@@ -1,0 +1,38 @@
+[
+  {
+    "username": "daniel",
+    "roles": null,
+    "logins": null,
+    "password": "$2a$10$LuvLuDnGxT0rzh8fxvlQ/O0S.6Ahp9TExINXWm3CnjzWpWqrVIkua"
+  },
+  {
+    "username": "mahilet",
+    "roles": [
+      "admin"
+    ],
+    "logins": [
+      "root",
+      "ubuntu"
+    ]
+  },
+  {
+    "username": "animaw",
+    "roles": [
+      "admin"
+    ],
+    "logins": [
+      "root",
+      "ubuntu"
+    ]
+  },
+  {
+    "username": "gashaw",
+    "roles": [
+      "admin"
+    ],
+    "logins": [
+      "root",
+      "ubuntu"
+    ]
+  }
+]

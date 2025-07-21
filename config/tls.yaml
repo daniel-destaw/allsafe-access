@@ -1,0 +1,2 @@
+cert_file: config/cert.pem
+key_file: config/key.pem

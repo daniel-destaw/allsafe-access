@@ -1,0 +1,7 @@
+server:
+    address: 0.0.0.0:8443
+    tls_cert_file: config/cert.pem
+    tls_key_file: config/key.pem
+    secure: true
+redis:
+    address: localhost:6379

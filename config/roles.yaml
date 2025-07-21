@@ -1,0 +1,40 @@
+# Roles define what users can do in the system.
+# Permissions are granular and control access to resources.
+
+admin:
+  options:
+    max_session_ttl: 24h0m0s
+    port_forwarding: true
+    certificate_format: standard
+  allow:
+    logins: ["root", "admin"]
+    node_labels:
+      "*": "*"
+    rules:
+      - resources: ["session", "node", "user", "role", "auth_server"]
+        verbs: ["read", "list", "create", "update", "delete"]
+
+developer:
+  options:
+    max_session_ttl: 8h0m0s
+    port_forwarding: false
+    certificate_format: standard
+  allow:
+    logins: ["dev", "ubuntu"]
+    node_labels:
+      "env": "development"
+    rules:
+      - resources: ["session", "node"]
+        verbs: ["read", "list", "create"]
+
+auditor:
+  options:
+    max_session_ttl: 4h0m0s
+    port_forwarding: false
+  allow:
+    logins: ["audit"]
+    node_labels:
+      "*": "*"
+    rules:
+      - resources: ["session", "node", "user"]
+        verbs: ["read", "list"]

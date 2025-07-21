@@ -1,21 +1,22 @@
-package allsafe
+package main
 
 import (
-	"github.com/spf13/cobra"
+    "fmt"
+    "github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "allsafe",
-	Short: "Allsafe CLI for access control",
-}
-
-func Execute() {
-	cobra.CheckErr(rootCmd.Execute())
+    Use:   "allsafe",
+    Short: "Allsafe Access CLI",
+    Long:  "Command line interface for Allsafe Access",
 }
 
 func init() {
-	rootCmd.AddCommand(addUserCmd)
-	rootCmd.AddCommand(deleteUserCmd)
-	rootCmd.AddCommand(updateUserCmd)
-	rootCmd.AddCommand(listUsersCmd)
+    rootCmd.AddCommand(initCmd) // make sure initCmd is declared
+}
+
+func Execute() {
+    if err := rootCmd.Execute(); err != nil {
+        fmt.Println(err)
+    }
 }

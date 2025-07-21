@@ -1,1 +1,1 @@
-package allsafe
+package main

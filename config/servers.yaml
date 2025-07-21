@@ -1,0 +1,32 @@
+# Server definitions with metadata and access restrictions.
+
+- name: localhost
+  addr: 127.0.0.1:22
+  labels:
+    env: "local"
+    region: "us-east-1"
+    os: "linux"
+  allowed_roles: ["admin", "developer", "auditor"]
+
+- name: dev-server-1
+  addr: 192.168.10.20:22
+  labels:
+    env: "development"
+    region: "us-west-2"
+    os: "linux"
+  allowed_roles: ["developer", "admin"]
+
+- name: prod-db-server
+  addr: 10.0.5.4:22
+  labels:
+    env: "production"
+    region: "us-east-1"
+    os: "linux"
+  allowed_roles: ["admin"]
+
+- name: windows-host
+  addr: 192.168.100.50:22
+  labels:
+    env: "production"
+    os: "windows"
+  allowed_roles: ["admin"]
