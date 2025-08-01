@@ -1,0 +1,9 @@
+# ~/allsafe-access/allsafe-proxy.yaml
+listen_address: "10.195.130.14:8080" # Ensure this is correct
+cert_file: "./configs/certs/proxy.crt" # IMPORTANT: These paths must be correct relative to your current directory when running
+key_file: "./configs/certs/proxy.key"
+ca_cert_file: "./configs/certs/proxy_ca.crt" # This is a copy of rootCA.crt
+agent_listen_port: 8081
+agent_heartbeat_timeout_minutes: 5
+registration_token: "mySecureSharedToken" # <<< Ensure this matches your agent's token exactly!
+

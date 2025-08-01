@@ -1,0 +1,13 @@
+# allsafe-agent.yaml
+id: "agent-001" # Unique ID for this agent instance
+proxy_url: "https://10.195.130.14:8080" # The address of your allsafe-proxy
+listen_address: ":8081" # The port this agent listens on for proxy connections
+cert_file: "./configs/certs/agent.crt" # Or specify an absolute path to your cert
+key_file: "./configs/certs/agent.key"   # Or specify an absolute path to your key
+ca_cert_file: "./configs/certs/ca.crt" # Or specify an absolute path to your CA cert
+registration_token: "mySecureSharedToken" # Must match proxy's registration_token if set
+heartbeat_interval_seconds: 30
+labels:
+  os: "linux"
+  env: "production"
+  region: "east"

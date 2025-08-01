@@ -1,0 +1,5 @@
+# allsafe-cli.yaml
+proxy_url: "https://10.195.130.14:8080" # The address of your allsafe-proxy
+cert_file: "./configs/certs/cli.crt"   # '~/' will be expanded to your home directory
+key_file: "./configs/certs/cli.key"     # '~/' will be expanded to your home directory
+ca_cert_file: "./configs/certs/cli_ca.crt" # '~/' will be expanded to your home directory
