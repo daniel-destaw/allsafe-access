@@ -1,0 +1,14 @@
+kind: Role
+version: v1
+metadata:
+  description: "Admins have full access."
+spec:
+  options:
+    max_session_ttl: 8h
+    ssh_file_copy: true
+  allow:
+    logins:
+      - root # Allow login as 'root' on agent
+    rules:
+      - resources: ["nodes"]
+        verbs: ["access", "list", "run"] # Full access
