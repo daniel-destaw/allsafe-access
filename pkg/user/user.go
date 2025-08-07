@@ -3,71 +3,51 @@ package user
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"os"
-	"path/filepath"
-	"sync"
 )
 
-// User represents a user from users.json
+// User represents the structure of a user entry in the users.json file.
 type User struct {
 	Username string   `json:"username"`
-	Logins   []string `json:"logins"` // Unix logins the user is allowed to use directly
 	Roles    []string `json:"roles"`
-	Password string   `json:"password"` // IMPORTANT: In a real system, store hashed passwords!
+	Password string   `json:"password"`
 }
 
-// UserManager handles loading and retrieving user data.
+// UserManager manages a collection of loaded users.
 type UserManager struct {
-	users map[string]User // 'users' is unexported (private)
-	mu    sync.RWMutex    // Mutex to protect concurrent access to the users map
+	users map[string]User
 }
 
-// NewUserManager creates and initializes a UserManager by loading user data from the specified directory.
-func NewUserManager(configDir string) (*UserManager, error) {
-	um := &UserManager{}
-	if err := um.loadUsers(configDir); err != nil {
-		return nil, fmt.Errorf("failed to load users from %s: %w", configDir, err)
+// NewUserManager creates and initializes a UserManager by reading a JSON file
+// with a list of user configurations.
+func NewUserManager(filePath string) (*UserManager, error) {
+	manager := &UserManager{
+		users: make(map[string]User),
 	}
-	log.Printf("UserManager: Loaded %d users.", len(um.users))
-	return um, nil
-}
 
-// GetUserByUsername retrieves a user by their username.
-func (um *UserManager) GetUserByUsername(username string) (*User, bool) {
-	um.mu.RLock()
-	defer um.mu.RUnlock()
-	user, ok := um.users[username]
-	return &user, ok // Return a copy of the User struct
-}
-
-// UserCount returns the number of users loaded by the UserManager.
-// This is a public (exported) method to safely access the count of private 'users' map.
-func (um *UserManager) UserCount() int {
-	um.mu.RLock()
-	defer um.mu.RUnlock()
-	return len(um.users)
-}
-
-// loadUsers reads user data from a JSON file.
-func (um *UserManager) loadUsers(dir string) error {
-	um.mu.Lock()
-	defer um.mu.Unlock()
-	um.users = make(map[string]User)
-
-	filePath := filepath.Join(dir, "users.json")
-	data, err := os.ReadFile(filePath)
+	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to read users.json from %s: %w", filePath, err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("user config file not found: %s", filePath)
+		}
+		return nil, fmt.Errorf("failed to read user config file %s: %w", filePath, err)
 	}
 
-	var userList []User
-	if err := json.Unmarshal(data, &userList); err != nil {
-		return fmt.Errorf("failed to parse users.json from %s: %w", filePath, err)
+	var users []User
+	if err := json.Unmarshal(data, &users); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user JSON from %s: %w", filePath, err)
 	}
 
-	for _, u := range userList {
-		um.users[u.Username] = u
+	for _, u := range users {
+		manager.users[u.Username] = u
 	}
-	return nil
+
+	return manager, nil
+}
+
+// GetUser retrieves a user by their username.
+func (um *UserManager) GetUser(username string) (User, bool) {
+	user, found := um.users[username]
+	return user, found
 }

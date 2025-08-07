@@ -1,7 +1,7 @@
 kind: Role
 version: v1
 metadata:
-  name: admin-role
+  name: dev-role
   description: "Developer role with restricted access to specific nodes and multiple logins."
 spec:
   options:

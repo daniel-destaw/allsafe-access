@@ -2,159 +2,89 @@ package auth
 
 import (
 	"fmt"
-	"log"
-	"sync"
+	"time"
 
-	"allsafe-access/pkg/role" // <--- IMPORTANT: Update this import path to your Go module name
-	"allsafe-access/pkg/user" // <--- IMPORTANT: Update this import path to your Go module name
+	"allsafe-access/pkg/role"
+	"allsafe-access/pkg/user"
 )
 
-// UserPermissions holds the combined and effective permissions for a user across all their assigned roles.
+// UserPermissions is a flattened view of all permissions granted to a user.
 type UserPermissions struct {
-	MaxSessionTTL string
+	MaxSessionTTL time.Duration
 	SSHFileCopy   bool
-	AllowedLogins []string
-	// FIX: Changed NodeLabels to []map[string]interface{} to match pkg/role/role.go
-	AllowedNodeLabels []map[string]interface{}
-	AllowedRules  []role.Rule
-	DeniedLogins  []string
-	DeniedRules   []role.Rule
+	Permissions   []role.Permission
 }
 
-// AuthChecker orchestrates user authentication and permission retrieval.
+// Permission is a simplified struct for permission rules.
+type Permission struct {
+	Node   string
+	Logins []string
+}
+
+// AuthChecker is the main authentication and authorization component.
 type AuthChecker struct {
-	userManager *user.UserManager // Reference to the user manager
-	roles       map[string]role.Role // Map of loaded roles
-	rolesMu     sync.RWMutex        // Mutex for the roles map
+	userManager *user.UserManager
+	roleManager *role.RoleManager
 }
 
-// NewAuthChecker creates and initializes the AuthChecker.
-// It takes directories for user and role configurations.
-func NewAuthChecker(usersConfigDir, rolesConfigDir string) (*AuthChecker, error) {
-	ac := &AuthChecker{}
-
-	// Initialize UserManager
-	var err error
-	ac.userManager, err = user.NewUserManager(usersConfigDir)
+// NewAuthChecker initializes the AuthChecker with user and role managers.
+func NewAuthChecker(userFilePath, roleConfigDir string) (*AuthChecker, error) {
+	userManager, err := user.NewUserManager(userFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create user manager: %w", err)
+		return nil, fmt.Errorf("failed to create UserManager: %w", err)
 	}
 
-	// Load roles using the pkg/role package
-	loadedRoles, err := role.LoadRolesFromDirectory(rolesConfigDir)
+	roleManager, err := role.NewRoleManager(roleConfigDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load roles: %w", err)
+		return nil, fmt.Errorf("failed to create RoleManager: %w", err)
 	}
-	ac.rolesMu.Lock()
-	ac.roles = loadedRoles
-	ac.rolesMu.Unlock()
 
-	log.Printf("AuthChecker: Initialized with %d users and %d roles.", ac.userManager.UserCount(), len(ac.roles))
-
-	return ac, nil
+	return &AuthChecker{
+		userManager: userManager,
+		roleManager: roleManager,
+	}, nil
 }
 
-// VerifyUserAndGetPermissions authenticates a user by username and password,
-// and if successful, returns their effective permissions.
+// VerifyUserAndGetPermissions checks a user's password and aggregates their permissions.
 func (ac *AuthChecker) VerifyUserAndGetPermissions(username, password string) (*user.User, *UserPermissions, error) {
-	// 1. Get user from UserManager
-	userObj, ok := ac.userManager.GetUserByUsername(username)
-	if !ok {
-		return nil, nil, fmt.Errorf("user '%s' not found", username)
+	u, found := ac.userManager.GetUser(username)
+	if !found {
+		return nil, nil, fmt.Errorf("user not found: %s", username)
 	}
 
-	// 2. Authenticate user (password check)
-	// IMPORTANT: Replace with password hashing (e.g., bcrypt) in production!
-	if userObj.Password != password {
-		return userObj, nil, fmt.Errorf("invalid password for user '%s'", username)
+	if u.Password != password {
+		return nil, nil, fmt.Errorf("invalid password for user: %s", username)
 	}
 
-	// 3. Get effective permissions based on roles
-	permissions, err := ac.GetUserEffectivePermissions(userObj)
-	if err != nil {
-		return userObj, nil, fmt.Errorf("failed to get effective permissions for user '%s': %w", username, err)
+	// Initialize with default, safe permissions.
+	userPerms := &UserPermissions{
+		MaxSessionTTL: 0,
+		SSHFileCopy:   false,
+		Permissions:   make([]role.Permission, 0),
 	}
 
-	return userObj, permissions, nil
-}
-
-
-// GetUserEffectivePermissions aggregates all permissions for a given user based on their assigned roles.
-// This is a private helper used by VerifyUserAndGetPermissions.
-func (ac *AuthChecker) GetUserEffectivePermissions(userObj *user.User) (*UserPermissions, error) {
-	if userObj == nil {
-		return nil, fmt.Errorf("user object cannot be nil")
-	}
-
-	permissions := &UserPermissions{
-		AllowedLogins:     []string{},
-		// FIX: Initialize AllowedNodeLabels with the correct type
-		AllowedNodeLabels: []map[string]interface{}{},
-		AllowedRules:      []role.Rule{},
-		DeniedLogins:      []string{},
-		DeniedRules:       []role.Rule{},
-	}
-
-	// Start with the user's direct logins from users.json
-	if userObj.Logins != nil {
-		permissions.AllowedLogins = append(permissions.AllowedLogins, userObj.Logins...)
-	}
-
-	ac.rolesMu.RLock() // Read lock for accessing ac.roles map
-	defer ac.rolesMu.RUnlock()
-
-	for _, roleName := range userObj.Roles {
-		currentRole, ok := ac.roles[roleName]
-		if !ok {
-			log.Printf("Warning: User '%s' is assigned to unknown role '%s'. Skipping this role.", userObj.Username, roleName)
-			continue
+	for _, roleName := range u.Roles {
+		r, found := ac.roleManager.GetRole(roleName)
+		if !found {
+			return nil, nil, fmt.Errorf("role '%s' not found for user '%s'", roleName, username)
 		}
 
-		// Aggregate options (simplistic: last one wins for MaxSessionTTL, true if any for SSHFileCopy)
-		if currentRole.Spec.Options.MaxSessionTTL != "" {
-			permissions.MaxSessionTTL = currentRole.Spec.Options.MaxSessionTTL
+		// Aggregate permissions. We will take the max TTL and logical OR for ssh_file_copy.
+		if r.Spec.Options.MaxSessionTTL != "" {
+			d, err := time.ParseDuration(r.Spec.Options.MaxSessionTTL)
+			if err == nil && d > userPerms.MaxSessionTTL {
+				userPerms.MaxSessionTTL = d
+			}
 		}
-		if currentRole.Spec.Options.SSHFileCopy {
-			permissions.SSHFileCopy = true
-		}
-
-		// Aggregate allow rules
-		if currentRole.Spec.Allow.Logins != nil {
-			permissions.AllowedLogins = append(permissions.AllowedLogins, currentRole.Spec.Allow.Logins...)
-		}
-		// FIX: Now this append operation will work because types match
-		if currentRole.Spec.Allow.NodeLabels != nil {
-			permissions.AllowedNodeLabels = append(permissions.AllowedNodeLabels, currentRole.Spec.Allow.NodeLabels...)
-		}
-		if currentRole.Spec.Allow.Rules != nil {
-			permissions.AllowedRules = append(permissions.AllowedRules, currentRole.Spec.Allow.Rules...)
+		if r.Spec.Options.SSHFileCopy {
+			userPerms.SSHFileCopy = true
 		}
 
-		// Aggregate deny rules
-		if currentRole.Spec.Deny.Logins != nil {
-			permissions.DeniedLogins = append(permissions.DeniedLogins, currentRole.Spec.Deny.Logins...)
-		}
-		if currentRole.Spec.Deny.Rules != nil {
-			permissions.DeniedRules = append(permissions.DeniedRules, currentRole.Spec.Deny.Rules...)
+		// Aggregate all permission rules.
+		for _, p := range r.Spec.Permissions {
+			userPerms.Permissions = append(userPerms.Permissions, p)
 		}
 	}
 
-	// Deduplicate logins (both allowed and denied)
-	permissions.AllowedLogins = uniqueStrings(permissions.AllowedLogins)
-	permissions.DeniedLogins = uniqueStrings(permissions.DeniedLogins)
-
-	return permissions, nil
-}
-
-// uniqueStrings is a helper to deduplicate string slices.
-func uniqueStrings(slice []string) []string {
-	keys := make(map[string]struct{})
-	list := []string{}
-	for _, entry := range slice {
-		if _, value := keys[entry]; !value {
-			keys[entry] = struct{}{}
-			list = append(list, entry)
-		}
-	}
-	return list
+	return &u, userPerms, nil
 }

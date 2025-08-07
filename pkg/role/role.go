@@ -2,18 +2,24 @@ package role
 
 import (
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
-	"strings"
 	"gopkg.in/yaml.v2"
+	"io/ioutil"
+	"path/filepath"
 )
 
-// Role represents a role from roles/*.yaml
+// Permission represents a single permission rule within a role.
+// This is now a public, top-level struct so other packages can use it.
+type Permission struct {
+	Node   string   `yaml:"node"`
+	Logins []string `yaml:"logins"`
+}
+
+// Role represents the structure of a role configuration YAML file.
 type Role struct {
-	Kind     string `yaml:"kind"`
-	Version  string `yaml:"version"`
+	Kind    string `yaml:"kind"`
+	Version string `yaml:"version"`
 	Metadata struct {
+		Name        string `yaml:"name"`
 		Description string `yaml:"description"`
 	} `yaml:"metadata"`
 	Spec struct {
@@ -21,57 +27,51 @@ type Role struct {
 			MaxSessionTTL string `yaml:"max_session_ttl"`
 			SSHFileCopy   bool   `yaml:"ssh_file_copy"`
 		} `yaml:"options"`
-		Allow struct {
-			Logins    []string            `yaml:"logins"`
-			NodeLabels []map[string]interface{} `yaml:"node_labels"`
-			Rules     []Rule              `yaml:"rules"`
-		} `yaml:"allow"`
-		Deny struct {
-			Logins []string `yaml:"logins"`
-			Rules  []Rule   `yaml:"rules"`
-		} `yaml:"deny"`
+		Permissions []Permission `yaml:"permissions"`
 	} `yaml:"spec"`
 }
 
-// Rule represents an allow/deny rule within a role
-type Rule struct {
-	Resources []string            `yaml:"resources"`
-	Verbs     []string            `yaml:"verbs"`
-	NodeLabels map[string]interface{} `yaml:"node_labels,omitempty"`
+// RoleManager manages a collection of loaded roles.
+type RoleManager struct {
+	roles map[string]Role
 }
 
-// LoadRolesFromDirectory reads all YAML files in the specified directory
-// and parses them into a map of Role objects, keyed by their filename (without extension).
-func LoadRolesFromDirectory(dir string) (map[string]Role, error) {
-	loadedRoles := make(map[string]Role)
+// NewRoleManager creates and initializes a RoleManager by reading all YAML files
+// from the specified directory.
+func NewRoleManager(configDir string) (*RoleManager, error) {
+	manager := &RoleManager{
+		roles: make(map[string]Role),
+	}
 
-	files, err := os.ReadDir(dir)
+	files, err := ioutil.ReadDir(configDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read roles directory %s: %w", dir, err)
+		return nil, fmt.Errorf("failed to read role config directory %s: %w", configDir, err)
 	}
 
 	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".yaml") {
+		if file.IsDir() || filepath.Ext(file.Name()) != ".yaml" {
 			continue
 		}
 
-		filePath := filepath.Join(dir, file.Name())
-		data, err := os.ReadFile(filePath)
+		filePath := filepath.Join(configDir, file.Name())
+		data, err := ioutil.ReadFile(filePath)
 		if err != nil {
-			log.Printf("ERROR: Failed to read role file %s: %v", filePath, err)
-			continue
+			return nil, fmt.Errorf("failed to read role file %s: %w", filePath, err)
 		}
 
-		var role Role
-		if err := yaml.Unmarshal(data, &role); err != nil {
-			log.Printf("ERROR: Failed to parse role file %s. YAML content:\n---\n%s\n---\nUnmarshal Error: %v", filePath, string(data), err)
-			continue
+		var r Role
+		if err := yaml.Unmarshal(data, &r); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal role file %s: %w", filePath, err)
 		}
 
-		roleName := strings.TrimSuffix(file.Name(), ".yaml")
-		loadedRoles[roleName] = role
-		log.Printf("Loaded role: %s from %s", roleName, filePath)
+		manager.roles[r.Metadata.Name] = r
 	}
 
-	return loadedRoles, nil
+	return manager, nil
+}
+
+// GetRole retrieves a role by its name.
+func (rm *RoleManager) GetRole(name string) (Role, bool) {
+	role, found := rm.roles[name]
+	return role, found
 }

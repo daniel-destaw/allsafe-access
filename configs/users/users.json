@@ -1,14 +1,17 @@
 [
   {
+    "username": "test",
+    "roles": ["admin-role"],
+    "password": "test"
+  },
+  {
     "username": "daniel",
-    "logins": ["test"],
-    "roles": ["developer-role"],
+    "roles": ["dev-role"],
     "password": "daniel"
   },
   {
-    "username": "admin",
-    "logins": ["root"],
+    "username": "zola",
     "roles": ["admin-role"],
-    "password": "adminpass"
+    "password": "zola"
   }
 ]
