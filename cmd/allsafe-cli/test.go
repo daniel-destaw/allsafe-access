@@ -18,22 +18,23 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/c-bata/go-prompt"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-)
-
-// ANSI escape codes for colors
-const (
-	ColorReset  = "\033[0m"
-	ColorYellow = "\033[93m" // Light yellow
-	ColorBlue   = "\033[94m" // Light blue
 )
 
 var (
 	proxyAddress string
 	cliUser      string
 	currentUser  *User
+	// This variable will hold the initial state of the terminal.
+	initialTermState *term.State
+	// cachedNodes is a global variable to store the list of nodes,
+	// so we don't have to make a network request every time the completer runs.
+	cachedNodes []Node
+	// isHintEnabled is a global variable to control the visibility of the auto-completion hints.
+	isHintEnabled = true
 )
 
 // User represents a user with a session token
@@ -51,12 +52,20 @@ type Node struct {
 }
 
 func main() {
+	// Capture the initial terminal state as soon as the program starts.
+	// This state will be restored when the program exits.
+	fd := int(os.Stdin.Fd())
+	var err error
+	initialTermState, err = term.GetState(fd)
+	if err != nil {
+		log.Fatalf("Failed to get terminal state: %v", err)
+	}
+
 	cobra.OnInitialize(initConfig)
 	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(listNodesCmd)
 	rootCmd.AddCommand(accessCmd)
-
-	rootCmd.PersistentFlags().StringVarP(&proxyAddress, "proxy-address", "p", "https://10.195.130.14:8080", "Proxy server address")
+	rootCmd.PersistentFlags().StringVarP(&proxyAddress, "proxy", "p", "https://10.195.130.14:8080", "Proxy server address")
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -73,7 +82,12 @@ var rootCmd = &cobra.Command{
 	Short: "A CLI client for Allsafe Access",
 	Long:  "A CLI client to authenticate with the Allsafe Access proxy and connect to agents.",
 	Run: func(cmd *cobra.Command, args []string) {
-		interactiveCLI()
+		interactiveLogin()
+		if currentUser != nil {
+			// After a successful login, fetch the nodes once and cache them.
+			fetchAndCacheNodes()
+			interactiveCLI()
+		}
 	},
 }
 
@@ -83,6 +97,9 @@ var loginCmd = &cobra.Command{
 	Args:  cobra.MaximumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		interactiveLogin()
+		if currentUser != nil {
+			fmt.Printf("Login successful. You can now use the interactive CLI.\n")
+		}
 	},
 }
 
@@ -94,82 +111,138 @@ var listNodesCmd = &cobra.Command{
 			fmt.Println("Error: You must be logged in to list nodes.")
 			return
 		}
-		listNodes()
+		listNodesAndPrint()
 	},
 }
 
 var accessCmd = &cobra.Command{
-	Use:   "access [agent_id]",
+	Use:   "access [agent_id] [remote_user]",
 	Short: "Connect to an agent's interactive shell",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		if currentUser == nil {
 			fmt.Println("Error: You must be logged in to access a node.")
 			return
 		}
-		runAccess(args[0])
+		runAccess(args[0], args[1])
 	},
 }
 
-func interactiveCLI() {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		if currentUser == nil {
-			fmt.Printf("%sallsafe-cli> %s", ColorBlue, ColorReset)
-		} else {
-			fmt.Printf("%s%s@allsafe-access$ %s", ColorBlue, currentUser.Username, ColorReset)
-		}
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
-		parts := strings.Fields(input)
+// All commands for the go-prompt completer
+var commands = []prompt.Suggest{
+	{Text: "list-nodes", Description: "List all accessible nodes"},
+	{Text: "access", Description: "Connect to an agent's interactive shell"},
+	{Text: "refresh", Description: "Refresh the list of available nodes"},
+	{Text: "toggle-hint", Description: "Enable or disable command hints"},
+	{Text: "exit", Description: "Exit the CLI"},
+}
 
-		if len(parts) == 0 {
-			continue
-		}
+// completer is the function that provides auto-completion suggestions.
+// It now uses the cachedNodes variable for performance and respects the isHintEnabled flag.
+func completer(d prompt.Document) []prompt.Suggest {
+	// If hints are disabled, return an empty slice immediately.
+	if !isHintEnabled {
+		return []prompt.Suggest{}
+	}
 
-		command := parts[0]
-		args := []string{}
-		if len(parts) > 1 {
-			args = parts[1:]
-		}
+	word := d.GetWordBeforeCursor()
 
-		switch command {
-		case "login":
-			if currentUser != nil {
-				fmt.Println("You are already logged in.")
-				continue
-			}
-			interactiveLogin()
-		case "list-nodes":
-			if currentUser == nil {
-				fmt.Println("Error: You must be logged in to list nodes.")
-			} else {
-				listNodes()
-			}
+	if word == "" || d.Text == "" {
+		return prompt.FilterHasPrefix(commands, word, true)
+	}
+
+	parts := strings.Fields(d.Text)
+	if len(parts) > 0 {
+		switch parts[0] {
 		case "access":
-			if currentUser == nil {
-				fmt.Println("Error: You must be logged in to access a node.")
-			} else if len(args) < 1 {
-				fmt.Println("Usage: access <agent_id>")
-			} else {
-				runAccess(args[0])
+			// We now use the cachedNodes list instead of making a new network request
+			// every time a character is typed.
+			var suggests []prompt.Suggest
+			for _, node := range cachedNodes {
+				suggests = append(suggests, prompt.Suggest{Text: node.ID, Description: fmt.Sprintf("OS: %s, Region: %s", node.Labels["os"], node.Labels["region"])})
 			}
-		case "exit":
-			fmt.Printf("%sGoodbye!%s\n", ColorYellow, ColorReset)
-			return
-		default:
-			fmt.Println("Unknown command. Available commands: login, list-nodes, access <agent_id>, exit")
+			return prompt.FilterHasPrefix(suggests, word, true)
 		}
 	}
+	return prompt.FilterHasPrefix(commands, word, true)
+}
+
+// executor is the function that handles the command after the user presses Enter
+func executor(in string) {
+	in = strings.TrimSpace(in)
+	if in == "" {
+		return
+	}
+	parts := strings.Fields(in)
+	command := parts[0]
+	args := []string{}
+	if len(parts) > 1 {
+		args = parts[1:]
+	}
+
+	switch command {
+	case "list-nodes":
+		if currentUser == nil {
+			fmt.Println("Error: You must be logged in to list nodes.")
+		} else {
+			listNodesAndPrint()
+		}
+	case "access":
+		if currentUser == nil {
+			fmt.Println("Error: You must be logged in to access a node.")
+		} else if len(args) < 2 {
+			fmt.Println("Usage: access <agent_id> <remote_user>")
+		} else {
+			runAccess(args[0], args[1])
+		}
+	case "refresh":
+		fetchAndCacheNodes()
+		fmt.Println("Node list refreshed.")
+	case "toggle-hint":
+		isHintEnabled = !isHintEnabled
+		state := "enabled"
+		if !isHintEnabled {
+			state = "disabled"
+		}
+		fmt.Printf("Auto-completion hints are now %s.\n", state)
+	case "exit":
+		fmt.Printf("Goodbye!\n")
+		// Explicitly restore the terminal state before exiting the program.
+		term.Restore(int(os.Stdin.Fd()), initialTermState)
+		os.Exit(0)
+	default:
+		fmt.Println("Unknown command. Available commands: list-nodes, access <agent_id> <remote_user>, refresh, toggle-hint, exit")
+	}
+}
+
+func interactiveCLI() {
+	p := prompt.New(
+		executor,
+		completer,
+		prompt.OptionPrefix(getPromptPrefix()),
+		prompt.OptionTitle("Allsafe CLI"),
+		prompt.OptionLivePrefix(func() (string, bool) {
+			return getPromptPrefix(), true
+		}),
+	)
+	p.Run()
+}
+
+func getPromptPrefix() string {
+	if currentUser == nil {
+		return fmt.Sprintf("allsafe-cli> ")
+	}
+	return fmt.Sprintf("%s@allsafe-access$ ", currentUser.Username)
 }
 
 func interactiveLogin() {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("%sUsername: %s", ColorBlue, ColorReset)
+	fmt.Printf("Welcome to Allsafe CLI. Please log in.\n")
+	fmt.Printf("Username: ")
 	username, _ := reader.ReadString('\n')
 	username = strings.TrimSpace(username)
 
-	fmt.Printf("%sPassword: %s", ColorBlue, ColorReset)
+	fmt.Printf("Password: ")
 	bytePassword, _ := term.ReadPassword(int(os.Stdin.Fd()))
 	password := string(bytePassword)
 	fmt.Println()
@@ -207,18 +280,31 @@ func login(username, password string) {
 
 	var result map[string]string
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		// --- CHANGE MADE HERE ---
-		fmt.Printf("%s[allsafe-cli] Login successful. *Welcome, %s!*%s\n", ColorYellow, username, ColorReset)
+		fmt.Printf("[allsafe-cli] Login successful. *Welcome, %s!*\n", username)
 		currentUser = &User{Username: username, AuthTime: time.Now()}
 		return
 	}
 
 	currentUser = &User{Username: username, AuthTime: time.Now()}
-	// --- CHANGE MADE HERE ---
-	fmt.Printf("%s[allsafe-cli] Login successful. *Welcome, %s!*%s\n", ColorYellow, currentUser.Username, ColorReset)
+	fmt.Printf("[allsafe-cli] Login successful. *Welcome, %s!*\n", currentUser.Username)
 }
 
-func listNodes() {
+// fetchAndCacheNodes fetches the nodes from the proxy and stores them in the global cache.
+func fetchAndCacheNodes() {
+	nodes, err := listNodes()
+	if err != nil {
+		fmt.Println("Failed to fetch nodes:", err)
+		return
+	}
+	cachedNodes = nodes
+}
+
+// listNodes now returns the cached nodes if they exist, or fetches them if not.
+func listNodes() ([]Node, error) {
+	if currentUser == nil {
+		return nil, fmt.Errorf("not logged in")
+	}
+
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
@@ -230,60 +316,57 @@ func listNodes() {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("Error listing nodes: %v\n", err)
-		return
+		return nil, fmt.Errorf("error listing nodes: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		fmt.Printf("Error listing nodes (Status: %d): %s\n", resp.StatusCode, string(bodyBytes))
-		return
+		return nil, fmt.Errorf("error listing nodes (Status: %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var nodes []Node
 	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
-		fmt.Printf("Error parsing nodes list: %v\n", err)
+		return nil, fmt.Errorf("error parsing nodes list: %v", err)
+	}
+	return nodes, nil
+}
+
+func listNodesAndPrint() {
+	nodes, err := listNodes()
+	if err != nil {
+		fmt.Println(err)
 		return
 	}
 
-	fmt.Printf("%s---%s\n", ColorBlue, ColorReset)
-	fmt.Printf("%sAllowed Agents:%s\n", ColorBlue, ColorReset)
-	fmt.Printf("%s---%s\n", ColorBlue, ColorReset)
+	fmt.Printf("---\n")
+	fmt.Printf("Allowed Agents:\n")
+	fmt.Printf("---\n")
 	for _, node := range nodes {
-		fmt.Printf("%sID:%s %s\n", ColorYellow, ColorReset, node.ID)
+		fmt.Printf("ID: %s\n", node.ID)
 		if len(node.Labels) > 0 {
-			fmt.Printf("%sLabels:%s %v\n", ColorYellow, ColorReset, node.Labels)
+			fmt.Printf("Labels: %v\n", node.Labels)
 		}
-		fmt.Printf("%s---%s\n", ColorBlue, ColorReset)
+		fmt.Printf("---\n")
 	}
 }
 
-func runAccess(nodeID string) {
-	fmt.Printf("%sAttempting to connect to agent %s...%s\n", ColorBlue, nodeID, ColorReset)
+func runAccess(nodeID, remoteUser string) {
+	fmt.Printf("Attempting to connect to agent %s as user %s...\n", nodeID, remoteUser)
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("%sRemote login user:%s ", ColorBlue, ColorReset)
-	remoteUser, _ := reader.ReadString('\n')
-	remoteUser = strings.TrimSpace(remoteUser)
-	if remoteUser == "" {
-		fmt.Println("Remote user cannot be empty.")
-		return
-	}
-
-	// Save the old terminal state and set to raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		log.Printf("Failed to set terminal to raw mode: %v", err)
 		return
 	}
-	// Defer a function to restore the terminal state
+
+	// This defer block ensures the terminal is restored and a new line is printed
+	// to reset the cursor position before the next go-prompt is drawn.
 	defer func() {
 		_ = term.Restore(int(os.Stdin.Fd()), oldState)
-		fmt.Print("\r\n") // Add a newline to move to a new line after the session
+		fmt.Print("\n")
 	}()
 
-	// Construct the WebSocket URL with query parameters
 	wsURL := strings.Replace(proxyAddress, "https", "wss", 1) + "/cli/shell"
 	query := url.Values{}
 	query.Add("node_id", nodeID)
@@ -300,29 +383,21 @@ func runAccess(nodeID string) {
 		},
 	}
 
-	// Add the authentication header
 	header := http.Header{}
 	header.Add("X-Auth-Token", currentUser.Username)
 
 	conn, resp, err := dialer.Dial(fullWsURL, header)
 	if err != nil {
-		_ = term.Restore(int(os.Stdin.Fd()), oldState) // Restore terminal on error
-
 		if resp != nil {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			body := strings.TrimSpace(string(bodyBytes))
-
-			// Check for the specific unauthorized error from the proxy
 			if resp.StatusCode == http.StatusForbidden {
-				fmt.Printf("%sError: Unauthorized. %s%s\n", ColorYellow, body, ColorReset)
+				fmt.Printf("Error: Unauthorized. %s\n", body)
 				return
 			}
-
-			// For other HTTP errors, show a more detailed message
-			fmt.Printf("%sError: Failed to connect to agent %s. Proxy/Agent response (Status: %d): %s%s\n", ColorYellow, nodeID, resp.StatusCode, body, ColorReset)
+			fmt.Printf("Error: Failed to connect to agent %s. Proxy/Agent response (Status: %d): %s\n", nodeID, resp.StatusCode, body)
 		} else {
-			// For general network or dialer errors
-			fmt.Printf("%sError: Failed to connect to agent %s. Error: %v%s\n", ColorYellow, nodeID, err, ColorReset)
+			fmt.Printf("Error: Failed to connect to agent %s. Error: %v\n", nodeID, err)
 		}
 		return
 	}
@@ -332,7 +407,8 @@ func runAccess(nodeID string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Read from stdin and send to WebSocket
+	done := make(chan struct{})
+
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, 1024)
@@ -351,7 +427,6 @@ func runAccess(nodeID string) {
 				if n > 0 {
 					err := conn.WriteMessage(websocket.BinaryMessage, buf[:n])
 					if err != nil {
-						// The connection is likely closed, so we'll just stop
 						return
 					}
 				}
@@ -359,14 +434,17 @@ func runAccess(nodeID string) {
 		}
 	}()
 
-	// Read from WebSocket and write to stdout
 	go func() {
 		defer wg.Done()
 		for {
 			messageType, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Println("read:", err)
-				cancel()
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					fmt.Printf("\r\n[allsafe-cli] Logout successful.\n")
+				} else {
+					log.Println("read:", err)
+				}
+				close(done)
 				return
 			}
 			if messageType == websocket.BinaryMessage {
@@ -376,6 +454,8 @@ func runAccess(nodeID string) {
 			}
 		}
 	}()
-
+	
+	<-done
+	cancel()
 	wg.Wait()
 }

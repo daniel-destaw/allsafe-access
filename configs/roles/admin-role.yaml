@@ -8,7 +8,7 @@ spec:
     max_session_ttl: 8h
     ssh_file_copy: true
   permissions:
-    - node: agent-001
+    - node: ubuntus
       logins:
         - test
         - root
