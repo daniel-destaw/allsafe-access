@@ -2,25 +2,19 @@ package main
 
 import (
 	"database/sql"
+	"flag"
 	"log"
 
-	// This is the SQLite driver. The underscore `_` tells Go to import the package
-	// and execute its init() function, but not to use its exported functions directly.
-	// This makes the driver available to the standard `database/sql` package.
 	_ "github.com/mattn/go-sqlite3"
 )
 
 // setupDatabase opens the database connection and creates the necessary tables.
 func setupDatabase(dbPath string) (*sql.DB, error) {
-	// Open a connection to the SQLite database file.
-	// If the file does not exist, it will be created.
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// SQL statements to create the users and audit_logs tables.
-	// The `IF NOT EXISTS` clause prevents errors if the tables already exist.
 	createUsersTableSQL := `
 	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,8 +37,6 @@ func setupDatabase(dbPath string) (*sql.DB, error) {
 
 	log.Println("Creating tables...")
 
-	// Execute the SQL statements to create the tables.
-	// We use db.Exec() for operations that do not return a set of rows.
 	_, err = db.Exec(createUsersTableSQL)
 	if err != nil {
 		return nil, err
@@ -60,11 +52,11 @@ func setupDatabase(dbPath string) (*sql.DB, error) {
 }
 
 func main() {
-	// Define the path to your database file.
-	dbPath := "./allsafe_admin.db"
+	// Define a command-line flag for the database path.
+	dbPath := flag.String("db", "./allsafe_admin.db", "Path to the SQLite database file")
+	flag.Parse()
 
-	// Call the setup function to create the database and tables.
-	db, err := setupDatabase(dbPath)
+	db, err := setupDatabase(*dbPath)
 	if err != nil {
 		log.Fatalf("Failed to setup database: %v", err)
 	}
@@ -72,4 +64,3 @@ func main() {
 
 	log.Println("Database connection is ready.")
 }
-

@@ -11,7 +11,8 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.30
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
-	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
+	golang.org/x/crypto v0.32.0
+	golang.org/x/term v0.28.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
