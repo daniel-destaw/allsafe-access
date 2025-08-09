@@ -1,98 +1,53 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"html/template"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
+
 	"allsafe-access/pkg/auth"
-	"golang.org/x/term"
-)
+	"allsafe-access/pkg/db" // New import
 
-func main() {
-	// --- Setup: Hardcoded paths for this example ---
-	// In a real application, these paths would be configurable.
-	userFilePath := "./configs/users/users.json"
-	roleConfigDir := "./configs/roles"
+	"golang.org/x/crypto/bcrypt" // New import
+	_ "github.com/mattn/go-sqlite3" // New import
 
-	// Create a new AuthChecker instance
-	ac, err := auth.NewAuthChecker(userFilePath, roleConfigDir)
-	if err != nil {
-		log.Fatalf("Failed to initialize AuthChecker: %v", err)
-	}
-
-	// --- Interactive Login ---
-	var username string
-	fmt.Print("Enter username: ")
-	fmt.Scanln(&username)
-
-	fmt.Print("Enter password: ")
-	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
-	if err != nil {
-		fmt.Println("Error reading password:", err)
-		return
-	}
-	password := string(bytePassword)
-	fmt.Println() // Print a newline after reading the password
-
-	// Verify the user and get their permissions
-	userObj, permissions, err := ac.VerifyUserAndGetPermissions(username, password)
-	if err != nil {
-		fmt.Printf("Login failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	// --- Displaying Results ---
-	fmt.Printf("Login successful for user: %s\n", userObj.Username)
-	fmt.Println("--- User Roles and Permissions ---")
-	fmt.Printf("Roles: %v\n", userObj.Roles)
-	fmt.Printf("Effective Max Session TTL: %v\n", permissions.MaxSessionTTL)
-	fmt.Printf("SSH File Copy Allowed: %t\n", permissions.SSHFileCopy)
-	fmt.Println("Permission Rules:")
-	for _, p := range permissions.Permissions {
-		fmt.Printf("  - Node: %s, Logins: %v\n", p.Node, p.Logins)
-	}
-}
-package main
-
-import (
-    "bytes"
-    "context"
-    "crypto/tls"
-    "crypto/x509"
-    "encoding/json"
-    "fmt"
-    "io"
-    "log"
-    "net/http"
-    "net/url"
-    "os"
-    "os/signal"
-    "path/filepath"
-    "strings"
-    "sync"
-    "syscall"
-    "time"
-
-    "allsafe-access/pkg/auth"
-
-    "github.com/gorilla/websocket"
-    "github.com/spf13/cobra"
-    "github.com/spf13/viper"
+	"github.com/gorilla/websocket"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // ProxyConfig defines the structure for proxy.yaml configuration
 type ProxyConfig struct {
-    ListenAddress                string `mapstructure:"listen_address"`
-    CertFile                     string `mapstructure:"cert_file"`
-    KeyFile                      string `mapstructure:"key_file"`
-    CACertFile                   string `mapstructure:"ca_cert_file"`
-    AgentListenPort              int    `mapstructure:"agent_listen_port"`
-    AgentHeartbeatTimeoutMinutes int    `mapstructure:"agent_heartbeat_timeout_minutes"`
-    RegistrationToken            string `mapstructure:"registration_token"`
-    RequireClientCertForCLI      bool   `mapstructure:"require_client_cert_for_cli"`
-    UsersConfigPath              string `mapstructure:"users_config_path"` // Renamed for clarity
-    RolesConfigDir               string `mapstructure:"roles_config_dir"`
+	ListenAddress                string `mapstructure:"listen_address"`
+	CertFile                     string `mapstructure:"cert_file"`
+	KeyFile                      string `mapstructure:"key_file"`
+	CACertFile                   string `mapstructure:"ca_cert_file"`
+	AgentListenPort              int    `mapstructure:"agent_listen_port"`
+	AgentHeartbeatTimeoutMinutes int    `mapstructure:"agent_heartbeat_timeout_minutes"`
+	RegistrationToken            string `mapstructure:"registration_token"`
+	RequireClientCertForCLI      bool   `mapstructure:"require_client_cert_for_cli"`
+	UsersConfigPath              string `mapstructure:"users_config_path"`
+	RolesConfigDir               string `mapstructure:"roles_config_dir"`
+	InviteURLBase                string `mapstructure:"invite_url_base"`
 }
 
 var proxyCfg ProxyConfig
@@ -100,6 +55,36 @@ var cfgFile string
 var authChecker *auth.AuthChecker
 var authenticatedUsers = make(map[string]*auth.UserPermissions)
 var authMutex sync.RWMutex
+var database *db.Database // New: Database connection for admin tasks
+
+// Moved constants and variables from allsafe-admin
+var secretKey = []byte("a-very-long-and-secure-secret-key-for-signing-tokens")
+var passwordPolicyDetails = map[string]struct {
+	MinLength    int
+	HasUppercase bool
+	HasNumber    bool
+	HasSpecial   bool
+}{
+	"none": {MinLength: 0},
+	"medium": {
+		MinLength:    8,
+		HasUppercase: true,
+		HasNumber:    true,
+	},
+	"hard": {
+		MinLength:    12,
+		HasUppercase: true,
+		HasNumber:    true,
+		HasSpecial:   true,
+	},
+}
+
+// tokenPayload is the structure for the invitation token payload.
+type tokenPayload struct {
+	Username       string `json:"username"`
+	PasswordPolicy string `json:"policy"`
+	Nonce          string `json:"nonce"`
+}
 
 func initConfig(appName string) {
     if cfgFile != "" {
@@ -138,6 +123,9 @@ const (
     interactiveSessionEndpoint = "/agent/interactive"
     authEndpoint               = "/cli/auth"
     listNodesEndpoint          = "/cli/nodes"
+	// New endpoints for admin communication
+    inviteEndpoint             = "/invite"
+    setPasswordEndpoint        = "/set-password"
 )
 
 type AgentInfo struct {
@@ -177,6 +165,8 @@ func init() {
     viper.BindPFlag("users_config_path", rootCmd.Flags().Lookup("users-db"))
     rootCmd.Flags().String("roles-dir", "", "Directory containing the roles/*.yaml files")
     viper.BindPFlag("roles_config_dir", rootCmd.Flags().Lookup("roles-dir"))
+	rootCmd.Flags().String("invite-url-base", "", "The base URL for the invitation links (e.g., https://proxy.example.com)")
+	viper.BindPFlag("invite_url_base", rootCmd.Flags().Lookup("invite-url-base"))
 
     viper.SetDefault("listen_address", ":8080")
     viper.SetDefault("cert_file", "/etc/allsafe-proxy/proxy.crt")
@@ -188,6 +178,7 @@ func init() {
     viper.SetDefault("require_client_cert_for_cli", false)
     viper.SetDefault("users_config_path", "./allsafe_admin.db")
     viper.SetDefault("roles_config_dir", "./configs/roles")
+	viper.SetDefault("invite_url_base", "https://localhost:8080")
 }
 
 var rootCmd = &cobra.Command{
@@ -211,8 +202,16 @@ func runProxy(cmd *cobra.Command, args []string) {
 
     log.Printf("Loaded Proxy Config: %+v\n", proxyCfg)
 
+	// New: Establish database connection for the set-password handler
+	var err error
+	database, err = db.NewDatabase(proxyCfg.UsersConfigPath)
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer database.Close()
+	log.Println("Database connection established.")
+
     // Initial load of the auth checker
-    var err error
     authMutex.Lock()
     authChecker, err = auth.NewAuthChecker(proxyCfg.UsersConfigPath, proxyCfg.RolesConfigDir)
     authMutex.Unlock()
@@ -253,6 +252,9 @@ func runProxy(cmd *cobra.Command, args []string) {
     mux.HandleFunc(authEndpoint, handleAuth)
     mux.HandleFunc(listNodesEndpoint, handleListNodes)
     mux.HandleFunc(cliShellEndpoint, handleCLIInteractiveRequest)
+	// New: Register the invite and set-password endpoints
+    mux.HandleFunc(inviteEndpoint, handleInvite)
+    mux.HandleFunc(setPasswordEndpoint, handleSetPassword)
 
     server := &http.Server{
         Addr:      proxyCfg.ListenAddress,
@@ -278,7 +280,388 @@ func runProxy(cmd *cobra.Command, args []string) {
     server.Shutdown(context.Background())
 }
 
-// reloadConfigsPeriodically reloads user and role configurations on a timer.
+// handleInvite handles the invitation link by serving the password creation form.
+func handleInvite(w http.ResponseWriter, r *http.Request) {
+    token := r.URL.Query().Get("token")
+    if token == "" {
+        http.Error(w, "Invitation token is missing.", http.StatusBadRequest)
+        return
+    }
+
+    payload, err := validateAndDecodeToken(token)
+    if err != nil {
+        http.Error(w, "Invalid or expired invitation token.", http.StatusForbidden)
+        log.Printf("Token validation failed: %v", err)
+        return
+    }
+
+    dbConnection, err := sql.Open("sqlite3", proxyCfg.UsersConfigPath)
+    if err != nil {
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        log.Printf("Failed to open database: %v", err)
+        return
+    }
+    defer dbConnection.Close()
+
+    var storedToken sql.NullString
+    querySQL := `SELECT invite_token FROM users WHERE username = ? AND password_hash IS NULL`
+    err = dbConnection.QueryRow(querySQL, payload.Username).Scan(&storedToken)
+    if err != nil || !storedToken.Valid || storedToken.String != token {
+        http.Error(w, "Invalid or expired invitation token.", http.StatusForbidden)
+        if err == sql.ErrNoRows {
+            log.Printf("User '%s' not found or token already used.", payload.Username)
+        } else {
+            log.Printf("Failed to query user by token for '%s': %v", payload.Username, err)
+        }
+        return
+    }
+
+    // Serve the HTML form to set the password.
+    tmpl, err := template.New("invite").Parse(inviteFormHTML)
+    if err != nil {
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+        log.Printf("Failed to parse template: %v", err)
+        return
+    }
+    w.Header().Set("Content-Type", "text/html")
+    tmpl.Execute(w, struct{ Token, PasswordPolicy, Username string }{Token: token, PasswordPolicy: payload.PasswordPolicy, Username: payload.Username})
+}
+
+// handleSetPassword handles the form submission to set a user's new password.
+func handleSetPassword(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    r.ParseForm()
+    token := r.FormValue("token")
+    password := r.FormValue("password")
+    confirmPassword := r.FormValue("confirm_password")
+
+    if token == "" || password == "" || confirmPassword == "" {
+        http.Error(w, "Token, password, or confirm password missing.", http.StatusBadRequest)
+        return
+    }
+
+    if password != confirmPassword {
+        http.Error(w, "Passwords do not match.", http.StatusBadRequest)
+        return
+    }
+    
+    payload, err := validateAndDecodeToken(token)
+    if err != nil {
+        http.Error(w, "Invalid or expired invitation token.", http.StatusForbidden)
+        log.Printf("Token validation failed: %v", err)
+        return
+    }
+
+    dbConnection, err := sql.Open("sqlite3", proxyCfg.UsersConfigPath)
+    if err != nil {
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        log.Printf("Failed to open database: %v", err)
+        return
+    }
+    defer dbConnection.Close()
+
+    var storedToken sql.NullString
+    querySQL := `SELECT invite_token FROM users WHERE username = ? AND password_hash IS NULL`
+    err = dbConnection.QueryRow(querySQL, payload.Username).Scan(&storedToken)
+    if err != nil || !storedToken.Valid || storedToken.String != token {
+        http.Error(w, "Invalid token or password already set.", http.StatusForbidden)
+        return
+    }
+
+    if err := validatePasswordComplexity(password, payload.PasswordPolicy); err != nil {
+        log.Printf("Password validation failed for user '%s': %v", payload.Username, err)
+        http.Error(w, fmt.Sprintf("Password validation failed: %v", err), http.StatusBadRequest)
+        return
+    }
+
+    hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+    if err != nil {
+        http.Error(w, "Failed to hash password", http.StatusInternalServerError)
+        log.Printf("Failed to hash password: %v", err)
+        return
+    }
+
+    updateSQL := `UPDATE users SET password_hash = ?, invite_token = NULL WHERE username = ? AND invite_token = ? AND password_hash IS NULL`
+    result, err := dbConnection.Exec(updateSQL, hashedPassword, payload.Username, token)
+    if err != nil {
+        http.Error(w, "Database error", http.StatusInternalServerError)
+        log.Printf("Failed to update password: %v", err)
+        return
+    }
+
+    rowsAffected, _ := result.RowsAffected()
+    if rowsAffected == 0 {
+        http.Error(w, "Invalid token or password already set.", http.StatusForbidden)
+        return
+    }
+    
+    // Success response template
+    fmt.Fprintf(w, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Success</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+            <div class="max-w-md w-full bg-white rounded-lg shadow-xl p-8 text-center">
+                <h1 class="text-3xl font-bold text-green-600 mb-4">Success!</h1>
+                <p class="text-gray-700">Your password has been set. You can now close this page and log in.</p>
+            </div>
+        </body>
+        </html>
+    `)
+}
+
+// createSignedToken generates a base64-encoded, HMAC-signed token.
+func createSignedToken(username, policy, nonce string) (string, error) {
+    payload := tokenPayload{
+        Username:       username,
+        PasswordPolicy: policy,
+        Nonce:          nonce,
+    }
+    payloadBytes, err := json.Marshal(payload)
+    if err != nil {
+        return "", err
+    }
+
+    h := hmac.New(sha256.New, secretKey)
+    h.Write(payloadBytes)
+    signature := h.Sum(nil)
+
+    token := fmt.Sprintf("%s.%s",
+        base64.URLEncoding.EncodeToString(payloadBytes),
+        base64.URLEncoding.EncodeToString(signature))
+
+    return token, nil
+}
+
+// validateAndDecodeToken validates the HMAC signature and decodes the token payload.
+func validateAndDecodeToken(token string) (*tokenPayload, error) {
+    parts := strings.Split(token, ".")
+    if len(parts) != 2 {
+        return nil, fmt.Errorf("invalid token format")
+    }
+
+    payloadBytes, err := base64.URLEncoding.DecodeString(parts[0])
+    if err != nil {
+        return nil, fmt.Errorf("failed to decode payload: %w", err)
+    }
+
+    signature, err := base64.URLEncoding.DecodeString(parts[1])
+    if err != nil {
+        return nil, fmt.Errorf("failed to decode signature: %w", err)
+    }
+
+    h := hmac.New(sha256.New, secretKey)
+    h.Write(payloadBytes)
+    expectedSignature := h.Sum(nil)
+
+    if !hmac.Equal(signature, expectedSignature) {
+        return nil, fmt.Errorf("invalid token signature")
+    }
+
+    var payload tokenPayload
+    if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
+    }
+
+    return &payload, nil
+}
+
+// validatePasswordComplexity checks if the given password meets the specified policy requirements.
+func validatePasswordComplexity(password, policy string) error {
+    details, ok := passwordPolicyDetails[policy]
+    if !ok {
+        return fmt.Errorf("unknown password policy: %s", policy)
+    }
+    
+    if len(password) < details.MinLength {
+        return fmt.Errorf("password must be at least %d characters long", details.MinLength)
+    }
+
+    if details.HasUppercase {
+        hasUppercase := false
+        for _, char := range password {
+            if 'A' <= char && char <= 'Z' {
+                hasUppercase = true
+                break
+            }
+        }
+        if !hasUppercase {
+            return fmt.Errorf("password must contain at least one uppercase letter")
+        }
+    }
+
+    if details.HasNumber {
+        hasNumber := false
+        for _, char := range password {
+            if '0' <= char && char <= '9' {
+                hasNumber = true
+                break
+            }
+        }
+        if !hasNumber {
+            return fmt.Errorf("password must contain at least one number")
+        }
+    }
+
+    if details.HasSpecial {
+        hasSpecial := false
+        specialChars := `!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`
+        for _, char := range password {
+            if strings.ContainsRune(specialChars, char) {
+                hasSpecial = true
+                break
+            }
+        }
+        if !hasSpecial {
+            return fmt.Errorf("password must contain at least one special character")
+        }
+    }
+
+    return nil
+}
+
+const inviteFormHTML = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Set Your Password</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" xintegrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ96j3JpBqL0zS7rM3k1g2tYvK2z5x5wTq8g8f/1a8m9/4e3p5Pz/2t6/f5e5w==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .error-message { color: #ef4444; font-size: 0.875rem; margin-top: 0.25rem; }
+        .policy-list li { display: flex; align-items: center; }
+        .policy-list li i { margin-right: 0.5rem; }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+    <div class="max-w-md w-full bg-white rounded-lg shadow-xl p-8">
+        <div class="text-center mb-6">
+            <i class="fa-solid fa-lock text-5xl text-blue-600"></i>
+            <h1 class="mt-4 text-2xl font-bold text-gray-800">Set Your Password</h1>
+            <p class="text-sm text-gray-500 mt-2">Create a new password for <strong class="text-blue-600">{{.Username}}</strong>.</p>
+        </div>
+        <form action="/set-password" method="post" class="space-y-6" onsubmit="return validatePassword(event)">
+            <input type="hidden" name="token" value="{{.Token}}">
+            <input type="hidden" id="policy" value="{{.PasswordPolicy}}">
+            <div>
+                <label for="password" class="block text-sm font-medium text-gray-700">New Password</label>
+                <input type="password" id="password" name="password" required class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 transition-colors duration-200" oninput="updatePasswordStrength()">
+            </div>
+            <div>
+                <label for="confirm_password" class="block text-sm font-medium text-gray-700">Confirm New Password</label>
+                <input type="password" id="confirm_password" name="confirm_password" required class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 transition-colors duration-200">
+                <p id="match-error" class="error-message hidden">Passwords do not match.</p>
+            </div>
+            
+            {{if ne .PasswordPolicy "none"}}
+            <div class="bg-gray-50 p-4 rounded-md shadow-sm">
+                <h3 class="text-sm font-semibold text-gray-800 mb-2">Password Requirements:</h3>
+                <ul id="password-requirements" class="text-sm text-gray-600 policy-list space-y-1">
+                    <li id="length-req" class="text-red-500"><i class="fas fa-times-circle"></i> Minimum {{if eq .PasswordPolicy "medium"}}8{{else}}12{{end}} characters</li>
+                    <li id="uppercase-req" class="text-red-500"><i class="fas fa-times-circle"></i> At least one uppercase letter</li>
+                    <li id="number-req" class="text-red-500"><i class="fas fa-times-circle"></i> At least one number</li>
+                    {{if eq .PasswordPolicy "hard"}}
+                    <li id="special-req" class="text-red-500"><i class="fas fa-times-circle"></i> At least one special character</li>
+                    {{end}}
+                </ul>
+            </div>
+            {{end}}
+
+            <div>
+                <button type="submit" class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors duration-200">
+                    Set Password
+                </button>
+            </div>
+        </form>
+    </div>
+    <script>
+        const passwordPolicyDetails = {
+            "none": { minLength: 0 },
+            "medium": { minLength: 8, hasUppercase: true, hasNumber: true, hasSpecial: false },
+            "hard": { minLength: 12, hasUppercase: true, hasNumber: true, hasSpecial: true }
+        };
+
+        function updatePasswordStrength() {
+            const password = document.getElementById('password').value;
+            const policy = document.getElementById('policy').value;
+            const requirements = passwordPolicyDetails[policy];
+
+            if (policy === "none") {
+                return;
+            }
+
+            const isLengthValid = password.length >= requirements.minLength;
+            const hasUppercase = !requirements.hasUppercase || /[A-Z]/.test(password);
+            const hasNumber = !requirements.hasNumber || /[0-9]/.test(password);
+            const hasSpecial = !requirements.hasSpecial || /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]+/.test(password);
+
+            const allValid = isLengthValid && hasUppercase && hasNumber && hasSpecial;
+
+            updateRequirementVisuals('length-req', isLengthValid);
+            updateRequirementVisuals('uppercase-req', hasUppercase);
+            updateRequirementVisuals('number-req', hasNumber);
+            if (requirements.hasSpecial) {
+                updateRequirementVisuals('special-req', hasSpecial);
+            }
+
+            return allValid;
+        }
+
+        function updateRequirementVisuals(elementId, isValid) {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+
+            const icon = element.querySelector('i');
+            if (isValid) {
+                element.classList.remove('text-red-500');
+                element.classList.add('text-green-600');
+                icon.classList.remove('fa-times-circle');
+                icon.classList.add('fa-check-circle');
+            } else {
+                element.classList.remove('text-green-600');
+                element.classList.add('text-red-500');
+                icon.classList.remove('fa-check-circle');
+                icon.classList.add('fa-times-circle');
+            }
+        }
+
+        function validatePassword(event) {
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            const matchError = document.getElementById('match-error');
+
+            if (password !== confirmPassword) {
+                matchError.classList.remove('hidden');
+                event.preventDefault();
+                return false;
+            }
+            matchError.classList.add('hidden');
+
+            const policy = document.getElementById('policy').value;
+            if (policy !== "none") {
+                const isPolicyValid = updatePasswordStrength();
+                if (!isPolicyValid) {
+                    alert("Password does not meet the complexity requirements.");
+                    event.preventDefault();
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    </script>
+</body>
+</html>
+`
+
 func reloadConfigsPeriodically() {
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
@@ -355,7 +738,6 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    // Store user permissions in the in-memory cache after successful authentication
     authMutex.Lock()
     authenticatedUsers[userObj.Username] = permissions
     authMutex.Unlock()
@@ -377,7 +759,6 @@ func handleListNodes(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Retrieve permissions from the in-memory cache
     authMutex.RLock()
     permissions, ok := authenticatedUsers[username]
     authMutex.RUnlock()
@@ -431,7 +812,6 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Retrieve permissions from the in-memory cache
     authMutex.RLock()
     permissions, ok := authenticatedUsers[userID]
     authMutex.RUnlock()
@@ -452,12 +832,9 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    // --- Authorization Check for Node and Login User ---
     isAuthorized := false
     for _, rule := range permissions.Permissions {
-        // Check if the node matches (or if it's a wildcard)
         if rule.Node == "*" || rule.Node == nodeID {
-            // Check if the requested login user is in the allowed logins for this rule.
             for _, allowedLogin := range rule.Logins {
                 if allowedLogin == loginUser {
                     isAuthorized = true
