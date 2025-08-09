@@ -1,82 +1,71 @@
-// cmd/allsafe-auth/main.go
 package main
 
 import (
-	"bufio"
-	"fmt"
-	"log"
-	"os"
-	"strings"
-	"allsafe-access/pkg/auth" // <--- IMPORTANT: Update this import path to your Go module name
+    "bufio"
+    "fmt"
+    "log"
+    "os"
+    "strings"
+
+    "allsafe-access/pkg/auth"
 )
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+    log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	usersConfigDir := "configs/users"
-	rolesConfigDir := "configs/roles"
+    // Define the paths to your configuration files.
+    // The userDBPath is now the path to your SQLite database file.
+    // The roleConfigDir is the directory containing YAML files.
+    usersDBPath := "./allsafe_admin.db"
+    rolesConfigDir := "configs/roles"
 
-	// --- REMOVED: No longer creating dummy config files ---
-	// Your program will now expect these files to exist at the specified paths.
-	// Ensure configs/users/users.json and configs/roles/allow_10.195.yaml are present.
-	// If they are not, the AuthChecker initialization will fail.
-	// --- End REMOVED ---
+    // Initialize the AuthChecker.
+    authChecker, err := auth.NewAuthChecker(usersDBPath, rolesConfigDir)
+    if err != nil {
+        log.Fatalf("Failed to initialize AuthChecker: %v", err)
+    }
+    log.Println("AuthChecker fully initialized and ready.")
 
-	// Initialize the AuthChecker, which in turn initializes UserManager and loads roles
-	authChecker, err := auth.NewAuthChecker(usersConfigDir, rolesConfigDir)
-	if err != nil {
-		log.Fatalf("Failed to initialize AuthChecker: %v", err)
-	}
-	log.Println("AuthChecker fully initialized and ready.")
+    reader := bufio.NewReader(os.Stdin)
 
-	reader := bufio.NewReader(os.Stdin)
+    fmt.Println("\n--- Allsafe Auth Interactive Test ---")
+    fmt.Println("Enter 'exit' for username to quit.")
 
-	fmt.Println("\n--- Allsafe Auth Interactive Test ---")
-	fmt.Println("Enter 'exit' for username to quit.")
+    for {
+        fmt.Print("\nEnter Username: ")
+        usernameInput, _ := reader.ReadString('\n')
+        username := strings.TrimSpace(usernameInput)
 
-	for {
-		fmt.Print("\nEnter Username: ")
-		usernameInput, _ := reader.ReadString('\n')
-		username := strings.TrimSpace(usernameInput)
+        if strings.ToLower(username) == "exit" {
+            break
+        }
 
-		if strings.ToLower(username) == "exit" {
-			break
-		}
+        fmt.Print("Enter Password: ")
+        passwordInput, _ := reader.ReadString('\n')
+        password := strings.TrimSpace(passwordInput)
 
-		fmt.Print("Enter Password: ")
-		passwordInput, _ := reader.ReadString('\n')
-		password := strings.TrimSpace(passwordInput)
+        // Call the AuthChecker to verify the user and get permissions.
+        userObj, permissions, err := authChecker.VerifyUserAndGetPermissions(username, password)
+        if err != nil {
+            fmt.Printf("Authentication failed for '%s': %v\n", username, err)
+            continue
+        }
 
-		// Call the AuthChecker to verify the user and get permissions
-		userObj, permissions, err := authChecker.VerifyUserAndGetPermissions(username, password)
-		if err != nil {
-			fmt.Printf("Authentication failed for '%s': %v\n", username, err)
-			continue
-		}
+        // Display the results.
+        fmt.Printf("\nAuthentication successful for user: %s\n", userObj.Username)
+        fmt.Printf("User Details:\n")
+        fmt.Printf("  Assigned Roles: %v\n", userObj.Roles)
 
-		// Display the results
-		fmt.Printf("\nAuthentication successful for user: %s\n", userObj.Username)
-		fmt.Printf("User Details from %s/users.json:\n", usersConfigDir)
-		fmt.Printf("  Direct Logins: %v\n", userObj.Logins)
-		fmt.Printf("  Assigned Roles: %v\n", userObj.Roles)
+        fmt.Printf("\nCombined Effective Permissions:\n")
+        fmt.Printf("  Max Session TTL: %s\n", permissions.MaxSessionTTL)
+        fmt.Printf("  SSH File Copy Allowed: %t\n", permissions.SSHFileCopy)
+        fmt.Printf("  Permission Rules (%d):\n", len(permissions.Permissions))
+        for i, p := range permissions.Permissions {
+            fmt.Printf("    Rule %d:\n", i+1)
+            fmt.Printf("      - Node: %s\n", p.Node)
+            fmt.Printf("      - Logins: %v\n", p.Logins)
+        }
+    }
 
-		fmt.Printf("\nCombined Effective Permissions:\n")
-		fmt.Printf("  Max Session TTL: %s\n", permissions.MaxSessionTTL)
-		fmt.Printf("  SSH File Copy Allowed: %t\n", permissions.SSHFileCopy)
-		fmt.Printf("  Allowed Logins: %v\n", permissions.AllowedLogins)
-		fmt.Printf("  Allowed Node Labels: %v\n", permissions.AllowedNodeLabels)
-		fmt.Printf("  Allowed Rules (%d):\n", len(permissions.AllowedRules))
-		for i, rule := range permissions.AllowedRules {
-			fmt.Printf("    Rule %d: Resources=%v, Verbs=%v, NodeLabels=%v\n", i+1, rule.Resources, rule.Verbs, rule.NodeLabels)
-		}
-		fmt.Printf("  Denied Logins: %v\n", permissions.DeniedLogins)
-		fmt.Printf("  Denied Rules (%d):\n", len(permissions.DeniedRules))
-		for i, rule := range permissions.DeniedRules {
-			fmt.Printf("    Rule %d: Resources=%v, Verbs=%v, NodeLabels=%v\n", i+1, rule.Resources, rule.Verbs, rule.NodeLabels)
-		}
-	}
-
-	fmt.Println("\nExiting Allsafe Auth Interactive Test. Goodbye!")
+    fmt.Println("\nExiting Allsafe Auth Interactive Test. Goodbye!")
 }
-
-// --- REMOVED: The setupDummyConfigs function is no longer here ---
