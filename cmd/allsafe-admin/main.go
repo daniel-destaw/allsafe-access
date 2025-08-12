@@ -2,17 +2,22 @@ package main
 
 import (
     "bufio"
+    "bytes"
     "crypto/hmac"
     "crypto/rand"
     "crypto/sha256"
+    "crypto/tls"
+    "crypto/x509"
     "database/sql"
     "encoding/base64"
     "encoding/json"
     "fmt"
     "io/ioutil"
     "log"
+    "net/http"
     "os"
     "strings"
+    "time"
 
     "github.com/spf13/cobra"
     _ "github.com/mattn/go-sqlite3"
@@ -35,8 +40,14 @@ var mfaType string
 // New flag to hold the proxy's URL
 var proxyURL string
 
+// caCertPath will hold the path to the CA certificate file.
+var caCertPath string
+
 // secretKey is used for signing the invitation token.
 var secretKey = []byte("a-very-long-and-secure-secret-key-for-signing-tokens")
+
+// adminToken is a simple, hardcoded token for the admin CLI to authenticate with the proxy's admin endpoints.
+const adminToken = "a-very-secret-admin-token-for-proxy-communication"
 
 // tokenPayload is the structure for the invitation token payload.
 type tokenPayload struct {
@@ -49,6 +60,14 @@ type tokenPayload struct {
 // Config represents the structure of the allsafe-proxy.yaml file.
 type Config struct {
     ListenAddress string `yaml:"listen_address"`
+}
+
+// ActiveSession represents a session returned by the proxy's /admin/sessions endpoint.
+type ActiveSession struct {
+    UserID string `json:"user_id"`
+    NodeID string `json:"node_id"`
+    LoginUser string `json:"login_user"`
+    StartTime time.Time `json:"start_time"`
 }
 
 // rootCmd represents the base command for the admin CLI.
@@ -65,6 +84,13 @@ var userCmd = &cobra.Command{
     Use:   "user",
     Short: "Manage user accounts",
     Long:  "Commands for adding, deleting, and managing users.",
+}
+
+// sessionsCmd is the parent command for all session-related actions.
+var sessionsCmd = &cobra.Command{
+    Use: "sessions",
+    Short: "Manage active user sessions and authenticated users",
+    Long: "Commands for listing and terminating active user sessions, and listing all authenticated users.",
 }
 
 // userAddCmd adds a new user with a generated invitation token.
@@ -122,7 +148,7 @@ var userAddCmd = &cobra.Command{
         if mfaType == "totp" {
             insertMfaSQL := `INSERT INTO mfa_devices (user_id, mfa_type_id, config, is_enabled) 
                             VALUES ((SELECT id FROM users WHERE username = ?), (SELECT id FROM mfa_types WHERE type_name = ?), ?, ?)`
-            _, err = tx.Exec(insertMfaSQL, username, mfaType, mfaSecret, 1)
+            _, err = tx.Exec(insertMfaSQL, username, mfaType, mfaSecret, 0)
             if err != nil {
                 log.Fatalf("Failed to insert MFA device: %v", err)
             }
@@ -235,7 +261,7 @@ var userResetPasswordCmd = &cobra.Command{
         if err != nil || !exists {
             log.Fatalf("Error: User '%s' not found.", username)
         }
-         
+
         // Generate a new, unique nonce for the token.
         nonceBytes := make([]byte, 16)
         if _, err := rand.Read(nonceBytes); err != nil {
@@ -344,7 +370,7 @@ var userGetCmd = &cobra.Command{
             }
             log.Fatalf("Failed to get user details: %v", err)
         }
-        
+
         // Check if MFA is enabled by querying the mfa_devices table
         mfaEnabled = sql.NullBool{Bool: false, Valid: true}
         var mfaTypeCount int
@@ -378,6 +404,142 @@ var userGetCmd = &cobra.Command{
     },
 }
 
+// createHTTPClientWithCA configures an HTTP client to trust a specific CA certificate.
+func createHTTPClientWithCA() *http.Client {
+    if caCertPath == "" {
+        // Fallback to default behavior if no CA cert is specified.
+        return &http.Client{}
+    }
+
+    caCert, err := ioutil.ReadFile(caCertPath)
+    if err != nil {
+        log.Fatalf("Failed to read CA certificate: %v", err)
+    }
+
+    caCertPool := x509.NewCertPool()
+    if !caCertPool.AppendCertsFromPEM(caCert) {
+        log.Fatalf("Failed to append CA certificate to pool")
+    }
+
+    tlsConfig := &tls.Config{
+        RootCAs: caCertPool,
+    }
+
+    transport := &http.Transport{
+        TLSClientConfig: tlsConfig,
+    }
+
+    return &http.Client{Transport: transport}
+}
+
+// terminateCmd terminates an active session for a given user.
+var terminateCmd = &cobra.Command{
+    Use:   "terminate [username]",
+    Short: "Terminate all active sessions for a user",
+    Args:  cobra.ExactArgs(1),
+    Run: func(cmd *cobra.Command, args []string) {
+        username := args[0]
+        log.Printf("Attempting to terminate sessions for user: %s\n", username)
+
+        if proxyURL == "" {
+            log.Fatal("Error: Proxy URL is not set. Use the --proxy-url flag or set it in the config.")
+        }
+
+        terminateURL := fmt.Sprintf("%s/admin/terminate-session", proxyURL)
+        requestBody, err := json.Marshal(map[string]string{"username": username})
+        if err != nil {
+            log.Fatalf("Failed to marshal request body: %v", err)
+        }
+
+        client := createHTTPClientWithCA()
+        req, err := http.NewRequest("POST", terminateURL, bytes.NewBuffer(requestBody))
+        if err != nil {
+            log.Fatalf("Failed to create request: %v", err)
+        }
+        req.Header.Set("Content-Type", "application/json")
+        req.Header.Set("X-Admin-Token", adminToken)
+
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Fatalf("Failed to connect to proxy: %v", err)
+        }
+        defer resp.Body.Close()
+
+        bodyBytes, _ := ioutil.ReadAll(resp.Body)
+        
+        // Handle the case where no active sessions are found gracefully
+        if resp.StatusCode == http.StatusBadRequest {
+            responseBody := string(bodyBytes)
+            if strings.Contains(responseBody, "No active sessions found for user") {
+                fmt.Printf("User '%s' did not have an active session to terminate.\n", username)
+                return
+            }
+        }
+        
+        if resp.StatusCode != http.StatusOK {
+            log.Fatalf("Proxy returned an error: %s", string(bodyBytes))
+        }
+
+        var result map[string]string
+        if err := json.Unmarshal(bodyBytes, &result); err != nil {
+            log.Fatalf("Failed to parse response from proxy: %v", err)
+        }
+
+        fmt.Println(result["message"])
+    },
+}
+
+// listActiveSessionsCmd lists all active sessions. This has been modified to list all authenticated users.
+var listActiveSessionsCmd = &cobra.Command{
+    Use: "active",
+    Short: "List all authenticated users",
+    Run: func(cmd *cobra.Command, args []string) {
+        log.Println("Attempting to list authenticated users...")
+
+        if proxyURL == "" {
+            log.Fatal("Error: Proxy URL is not set. Use the --proxy-url flag or set it in the config.")
+        }
+
+        listURL := fmt.Sprintf("%s/admin/authenticated-users", proxyURL)
+
+        client := createHTTPClientWithCA()
+        req, err := http.NewRequest("GET", listURL, nil)
+        if err != nil {
+            log.Fatalf("Failed to create request: %v", err)
+        }
+        req.Header.Set("X-Admin-Token", adminToken)
+
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Fatalf("Failed to connect to proxy: %v", err)
+        }
+        defer resp.Body.Close()
+
+        bodyBytes, _ := ioutil.ReadAll(resp.Body)
+
+        if resp.StatusCode != http.StatusOK {
+            log.Fatalf("Proxy returned an error: %s", string(bodyBytes))
+        }
+
+        var users []string
+        if err := json.Unmarshal(bodyBytes, &users); err != nil {
+            log.Fatalf("Failed to parse response from proxy: %v", err)
+        }
+
+        if len(users) == 0 {
+            fmt.Println("No users are currently authenticated.")
+            return
+        }
+
+        fmt.Println("Authenticated Users:")
+        fmt.Println("--------------------")
+        for _, user := range users {
+            fmt.Println(user)
+        }
+    },
+}
+
+
 // createSignedToken generates a base64-encoded, HMAC-signed token.
 func createSignedToken(username, policy, mfaSecret, nonce string) (string, error) {
     payload := tokenPayload{
@@ -410,7 +572,7 @@ func createDatabaseSchema() {
         log.Fatalf("Failed to open database for schema creation: %v", err)
     }
     defer db.Close()
-    
+
     // The users table definition now matches your existing schema.
     usersTableSQL := `
     CREATE TABLE IF NOT EXISTS users (
@@ -454,7 +616,7 @@ func createDatabaseSchema() {
     if err != nil {
         log.Fatalf("Failed to create 'users' table: %v", err)
     }
-    
+
     _, err = db.Exec(auditLogsTableSQL)
     if err != nil {
         log.Fatalf("Failed to create 'audit_logs' table: %v", err)
@@ -507,6 +669,7 @@ func init() {
     }
 
     rootCmd.AddCommand(userCmd)
+    rootCmd.AddCommand(sessionsCmd)
 
     userCmd.AddCommand(userAddCmd)
     userCmd.AddCommand(userDeleteCmd)
@@ -514,18 +677,22 @@ func init() {
     userCmd.AddCommand(userListCmd)
     userCmd.AddCommand(userGetCmd)
 
+    sessionsCmd.AddCommand(terminateCmd)
+    sessionsCmd.AddCommand(listActiveSessionsCmd)
+
     userAddCmd.Flags().StringVar(&role, "role", "user", "The role of the new user")
     userAddCmd.Flags().StringVar(&passwordPolicy, "policy", "none", "The password complexity policy (none, medium, hard)")
     userAddCmd.Flags().StringVar(&mfaType, "mfa", "none", "The MFA type for the new user (totp, hotp, none)")
 
     // New persistent flag for the proxy URL.
-    // The default is now set dynamically above.
     rootCmd.PersistentFlags().StringVar(&proxyURL, "proxy-url", proxyURL, "The base URL of the Allsafe Proxy server for invitation links")
+    // New persistent flag for the CA certificate path.
+    rootCmd.PersistentFlags().StringVar(&caCertPath, "cacert", "", "Path to the CA certificate file to trust for proxy connections")
 }
 
 func main() {
     createDatabaseSchema()
-    
+
     if err := rootCmd.Execute(); err != nil {
         fmt.Println(err)
         os.Exit(1)

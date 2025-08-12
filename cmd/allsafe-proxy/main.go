@@ -48,6 +48,7 @@ type ProxyConfig struct {
 	UsersConfigPath              string `mapstructure:"users_config_path"`
 	RolesConfigDir               string `mapstructure:"roles_config_dir"`
 	InviteURLBase                string `mapstructure:"invite_url_base"`
+	AdminToken                   string `mapstructure:"admin_token"`
 }
 
 var proxyCfg ProxyConfig
@@ -135,6 +136,9 @@ const (
 	listNodesEndpoint          = "/cli/nodes"
 	inviteEndpoint             = "/invite"
 	setPasswordEndpoint        = "/set-password"
+	terminateSessionEndpoint   = "/admin/terminate-session"
+	listSessionsEndpoint       = "/admin/sessions"
+	listAuthenticatedUsersEndpoint = "/admin/authenticated-users"
 )
 
 type AgentInfo struct {
@@ -144,12 +148,34 @@ type AgentInfo struct {
 	LastHeartbeat time.Time         `json:"LastHeartbeat"`
 }
 
+// ActiveSession stores the details of a currently active session.
+// This is used internally by the proxy to manage and terminate sessions.
+type ActiveSession struct {
+	UserID    string    `json:"user_id"`
+	NodeID    string    `json:"node_id"`
+	LoginUser string    `json:"login_user"`
+	StartTime time.Time `json:"start_time"`
+	Terminate chan struct{}
+}
+
+// SessionInfo is a public-facing struct for listing sessions,
+// without the internal control channel.
+type SessionInfo struct {
+	UserID    string    `json:"user_id"`
+	NodeID    string    `json:"node_id"`
+	LoginUser string    `json:"login_user"`
+	Duration  string    `json:"duration"`
+}
+
 var (
 	agents        = make(map[string]AgentInfo)
 	agentsMutex   sync.RWMutex
 	tlsConfig     *tls.Config
 	agentWsDialer *websocket.Dialer
 	inviteTemplate *template.Template
+	
+	activeSessions = make(map[string]ActiveSession)
+	sessionsMutex  sync.RWMutex
 )
 
 func init() {
@@ -184,6 +210,9 @@ func init() {
 	viper.BindPFlag("roles_config_dir", rootCmd.Flags().Lookup("roles-dir"))
 	rootCmd.Flags().String("invite-url-base", "", "The base URL for the invitation links (e.g., https://localhost:8080)")
 	viper.BindPFlag("invite_url_base", rootCmd.Flags().Lookup("invite-url-base"))
+	rootCmd.Flags().String("admin-token", "", "The shared secret token for administrative CLI commands.")
+	viper.BindPFlag("admin_token", rootCmd.Flags().Lookup("admin-token"))
+
 
 	viper.SetDefault("listen_address", ":8080")
 	viper.SetDefault("cert_file", "/etc/allsafe-proxy/proxy.crt")
@@ -196,6 +225,7 @@ func init() {
 	viper.SetDefault("users_config_path", "./allsafe_admin.db")
 	viper.SetDefault("roles_config_dir", "./configs/roles")
 	viper.SetDefault("invite_url_base", "https://localhost:8080")
+	viper.SetDefault("admin_token", "a-very-secret-admin-token-for-proxy-communication")
 }
 
 var rootCmd = &cobra.Command{
@@ -270,7 +300,10 @@ func runProxy(cmd *cobra.Command, args []string) {
 	mux.HandleFunc(cliShellEndpoint, handleCLIInteractiveRequest)
 	mux.HandleFunc(inviteEndpoint, handleInvite)
 	mux.HandleFunc(setPasswordEndpoint, handleSetPassword)
-	
+	mux.HandleFunc(terminateSessionEndpoint, handleTerminateSession)
+	mux.HandleFunc(listSessionsEndpoint, handleListSessions)
+	mux.HandleFunc(listAuthenticatedUsersEndpoint, handleAuthenticatedUsers)
+
 	fs := http.FileServer(http.Dir("cmd/allsafe-proxy/templates"))
 	mux.Handle("/static/", http.StripPrefix("/static/", fs))
 
@@ -295,6 +328,15 @@ func runProxy(cmd *cobra.Command, args []string) {
 	<-sigChan
 	log.Println("Shutting down proxy...")
 	server.Shutdown(context.Background())
+}
+
+// auditLog writes an entry to the audit_logs table.
+func auditLog(action, actorUsername, targetUsername, details string) {
+	auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
+	_, err := database.Exec(auditLogSQL, action, actorUsername, targetUsername, details)
+	if err != nil {
+		log.Printf("Warning: Failed to write to audit logs: %v", err)
+	}
 }
 
 func handleInvite(w http.ResponseWriter, r *http.Request) {
@@ -469,6 +511,9 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to commit transaction: %v", err)
 		return
 	}
+
+	// Log the password set action to the audit logs.
+	auditLog("password_set", payload.Username, payload.Username, "{}")
 
 	fmt.Fprintf(w, `
 		<!DOCTYPE html>
@@ -668,6 +713,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
 		log.Printf("Proxy: Authentication failed for user '%s': %v", req.Username, err)
+		auditLog("auth_failure", req.Username, req.Username, fmt.Sprintf(`{"reason": "%v"}`, err))
 		return
 	}
 
@@ -682,11 +728,13 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		if req.TotpCode == "" {
 			http.Error(w, "MFA required", http.StatusForbidden)
 			log.Printf("Proxy: Authentication failed for user '%s' - MFA required but not provided.", req.Username)
+			auditLog("auth_failure", req.Username, req.Username, `{"reason": "MFA required but not provided"}`)
 			return
 		}
 		if !mfa.ValidateTOTP(req.TotpCode, mfaSecret) {
 			http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
 			log.Printf("Proxy: Authentication failed for user '%s' - invalid TOTP code.", req.Username)
+			auditLog("auth_failure", req.Username, req.Username, `{"reason": "Invalid TOTP code"}`)
 			return
 		}
 	}
@@ -694,6 +742,9 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	authMutex.Lock()
 	authenticatedUsers[userObj.Username] = permissions
 	authMutex.Unlock()
+
+	// Log successful authentication.
+	auditLog("auth_success", req.Username, req.Username, "{}")
 
 	response := map[string]string{
 		"message": "Authentication successful",
@@ -802,10 +853,9 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 	if !isAuthorized {
 		http.Error(w, fmt.Sprintf("User '%s' is not authorized to access node '%s' as user '%s'.", userID, nodeID, loginUser), http.StatusForbidden)
 		log.Printf("Proxy: User '%s' is not authorized to access node '%s' as '%s' based on their role.", userID, nodeID, loginUser)
+		auditLog("interactive_session_denied", userID, nodeID, fmt.Sprintf(`{"remote_login": "%s", "reason": "unauthorized"}`, loginUser))
 		return
 	}
-
-	log.Printf("Proxy: Establishing interactive session for user '%s' (remote login: %s) with agent %s (%s)...", userID, loginUser, agent.ID, agent.IPAddress)
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin:     func(r *http.Request) bool { return true },
@@ -818,6 +868,26 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cliWs.Close()
+
+	sessionID := fmt.Sprintf("%s-%s-%s", userID, nodeID, loginUser)
+	terminateChan := make(chan struct{})
+
+	sessionsMutex.Lock()
+	activeSessions[sessionID] = ActiveSession{
+		UserID:    userID,
+		NodeID:    nodeID,
+		LoginUser: loginUser,
+		StartTime: time.Now(),
+		Terminate: terminateChan,
+	}
+	sessionsMutex.Unlock()
+
+	defer func() {
+		sessionsMutex.Lock()
+		delete(activeSessions, sessionID)
+		sessionsMutex.Unlock()
+		auditLog("interactive_session_end", userID, nodeID, fmt.Sprintf(`{"remote_login": "%s"}`, loginUser))
+	}()
 
 	agentWsURL := fmt.Sprintf("wss://%s:%d%s?user_id=%s&login_user=%s",
 		agent.IPAddress,
@@ -847,7 +917,7 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// This goroutine reads from the CLI and forwards to the agent.
+	// Goroutine to read from the CLI and forward to the agent.
 	go func() {
 		defer wg.Done()
 		for {
@@ -855,37 +925,48 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					log.Printf("Proxy: CLI WebSocket for agent %s (user %s) closed normally: %v", agent.ID, userID, err)
+					agentWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Client disconnected"))
 				} else {
 					log.Printf("Proxy: Error reading from CLI WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
+					agentWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseAbnormalClosure, "Client read error"))
 				}
-				agentWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Client disconnected"))
 				return
 			}
 			if err := agentWs.WriteMessage(messageType, message); err != nil {
 				log.Printf("Proxy: Error writing to Agent WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
+				cliWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseAbnormalClosure, "Agent write error"))
 				return
 			}
 		}
 	}()
 
-	// This is the corrected goroutine. It reads from the agent and forwards to the CLI.
+	// Goroutine to read from the agent and forward to the CLI,
+	// also listens for the termination signal.
 	go func() {
 		defer wg.Done()
 		for {
-			messageType, message, err := agentWs.ReadMessage()
-			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					log.Printf("Proxy: Agent WebSocket for agent %s (user %s) closed normally: %v", agent.ID, userID, err)
-				} else {
-					log.Printf("Proxy: Error reading from Agent WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
+			select {
+			case <-terminateChan:
+				log.Printf("Proxy: Received termination signal from admin for agent %s (user %s). Closing Agent WebSocket.", agent.ID, userID)
+				agentWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Session terminated by admin"))
+				return
+			default:
+				messageType, message, err := agentWs.ReadMessage()
+				if err != nil {
+					if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+						log.Printf("Proxy: Agent WebSocket for agent %s (user %s) closed normally: %v", agent.ID, userID, err)
+						cliWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Agent disconnected"))
+					} else {
+						log.Printf("Proxy: Error reading from Agent WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
+						cliWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseAbnormalClosure, "Agent read error"))
+					}
+					return
 				}
-				cliWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Agent disconnected"))
-				return
-			}
-			// Write the message back to the CLI WebSocket connection
-			if err := cliWs.WriteMessage(messageType, message); err != nil {
-				log.Printf("Proxy: Error writing to CLI WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
-				return
+				if err := cliWs.WriteMessage(messageType, message); err != nil {
+					log.Printf("Proxy: Error writing to CLI WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
+					agentWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseAbnormalClosure, "CLI write error"))
+					return
+				}
 			}
 		}
 	}()
@@ -1044,6 +1125,158 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("Proxy: Failed to copy agent response to client: %v", err)
 	}
+}
+
+func handleTerminateSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	if r.Header.Get("X-Admin-Token") != proxyCfg.AdminToken {
+		http.Error(w, "Unauthorized: Invalid admin token", http.StatusUnauthorized)
+		return
+	}
+
+
+	var req struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		log.Printf("Proxy: Failed to decode terminate session request: %v", err)
+		return
+	}
+
+	sessionsMutex.Lock()
+	defer sessionsMutex.Unlock()
+	
+	var terminatedSessions []ActiveSession
+	for key, session := range activeSessions {
+		if session.UserID == req.Username {
+			terminatedSessions = append(terminatedSessions, session)
+			// Send the signal to terminate the WebSocket
+			close(session.Terminate)
+			delete(activeSessions, key)
+		}
+	}
+
+	// Invalidate the user's authentication token on the proxy
+	authMutex.Lock()
+	delete(authenticatedUsers, req.Username)
+	authMutex.Unlock()
+
+	if len(terminatedSessions) == 0 {
+		http.Error(w, fmt.Sprintf("No active sessions found for user '%s'.", req.Username), http.StatusNotFound)
+		return
+	}
+
+	// Now, send a command to the agent to actually kill the shell process
+	for _, session := range terminatedSessions {
+		agentsMutex.RLock()
+		agent, ok := agents[session.NodeID]
+		agentsMutex.RUnlock()
+		if !ok {
+			log.Printf("Proxy: Agent %s not found for terminated session. Cannot send termination command.", session.NodeID)
+			continue
+		}
+
+		log.Printf("Proxy: Sending termination command to agent %s for user '%s' on login '%s'...", agent.ID, session.UserID, session.LoginUser)
+		terminateAgentSession(agent, session.UserID, session.LoginUser)
+	}
+
+	response := map[string]string{
+		"message": fmt.Sprintf("Successfully terminated %d session(s) and invalidated authentication token for user '%s'.", len(terminatedSessions), req.Username),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+
+	// Log the termination action
+	for _, session := range terminatedSessions {
+		auditLog("session_terminate", "allsafe-admin", session.UserID, fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, session.NodeID, session.LoginUser))
+	}
+}
+
+// terminateAgentSession sends a command to the specified agent to terminate a session.
+func terminateAgentSession(agent AgentInfo, userID, loginUser string) {
+	tr := &http.Transport{
+		TLSClientConfig: agentWsDialer.TLSClientConfig,
+	}
+	client := &http.Client{Transport: tr, Timeout: 30 * time.Second}
+
+	terminationReq := map[string]string{
+		"user_id":    userID,
+		"login_user": loginUser,
+	}
+	jsonData, err := json.Marshal(terminationReq)
+	if err != nil {
+		log.Printf("Proxy: Failed to marshal termination data for agent %s: %v", agent.ID, err)
+		return
+	}
+
+	// NOTE: This assumes the agent has a new dedicated endpoint to handle termination commands.
+	// The agent code must be updated to listen on a new endpoint (e.g., `/terminate-session`)
+	// and correctly identify and kill the corresponding process.
+	resp, err := client.Post(fmt.Sprintf("https://%s:%d/terminate-session", agent.IPAddress, proxyCfg.AgentListenPort), "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Proxy: Error forwarding termination command to agent %s (%s): %v", agent.ID, agent.IPAddress, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("Proxy: Agent %s returned non-OK status %d for termination command: %s", agent.ID, resp.StatusCode, string(bodyBytes))
+	}
+}
+
+func handleListSessions(w http.ResponseWriter, r *http.Request) {
+    if r.Header.Get("X-Admin-Token") != proxyCfg.AdminToken {
+		http.Error(w, "Unauthorized: Invalid admin token", http.StatusUnauthorized)
+		return
+	}
+
+    sessionsMutex.RLock()
+    defer sessionsMutex.RUnlock()
+
+    var sessionsList []SessionInfo
+    now := time.Now()
+    for _, session := range activeSessions {
+        duration := now.Sub(session.StartTime).Round(time.Second)
+        sessionsList = append(sessionsList, SessionInfo{
+            UserID:    session.UserID,
+            NodeID:    session.NodeID,
+            LoginUser: session.LoginUser,
+            Duration:  duration.String(),
+        })
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(sessionsList); err != nil {
+        log.Printf("Proxy: Failed to encode active sessions list: %v", err)
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+    }
+}
+
+func handleAuthenticatedUsers(w http.ResponseWriter, r *http.Request) {
+    if r.Header.Get("X-Admin-Token") != proxyCfg.AdminToken {
+        http.Error(w, "Unauthorized: Invalid admin token", http.StatusUnauthorized)
+        return
+    }
+
+    authMutex.RLock()
+    defer authMutex.RUnlock()
+
+    var authenticatedUsernames []string
+    for username := range authenticatedUsers {
+        authenticatedUsernames = append(authenticatedUsernames, username)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(authenticatedUsernames); err != nil {
+        log.Printf("Proxy: Failed to encode authenticated users list: %v", err)
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+    }
 }
 
 func cleanupOldAgents() {
