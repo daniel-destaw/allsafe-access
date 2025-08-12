@@ -2,13 +2,13 @@
 <html>
 <head>
     <title>Set Your Password</title>
-    
+     
     <link rel="stylesheet" href="/static/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
-    
+     
     <link rel="stylesheet" href="/static/styles/css2.css">
-    
+     
     <script src="/static/styles/3.4.17"></script>
-    
+     
     <style>
         body { font-family: 'Inter', sans-serif; }
         .error-message { color: #ef4444; font-size: 0.875rem; margin-top: 0.25rem; }
@@ -23,7 +23,7 @@
             <h1 class="mt-4 text-2xl font-bold text-gray-800">Set Your Password</h1>
             <p class="text-sm text-gray-500 mt-2">Create a new password for <strong class="text-blue-600">{{.Username}}</strong>.</p>
         </div>
-        <form action="/set-password" method="post" class="space-y-6" onsubmit="return validatePassword(event)">
+        <form action="/set-password" method="post" class="space-y-6" onsubmit="return validateForm(event)">
             <input type="hidden" name="token" value="{{.Token}}">
             <input type="hidden" id="policy" value="{{.PasswordPolicy}}">
             <div>
@@ -35,7 +35,7 @@
                 <input type="password" id="confirm_password" name="confirm_password" required class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 transition-colors duration-200">
                 <p id="match-error" class="error-message hidden">Passwords do not match.</p>
             </div>
-            
+             
             {{if ne .PasswordPolicy "none"}}
             <div class="bg-gray-50 p-4 rounded-md shadow-sm">
                 <h3 class="text-sm font-semibold text-gray-800 mb-2">Password Requirements:</h3>
@@ -50,6 +50,21 @@
             </div>
             {{end}}
 
+            {{if .MfaEnabled}}
+            <div class="bg-gray-50 p-4 rounded-md shadow-sm">
+                <h3 class="text-sm font-semibold text-gray-800 mb-2">Multi-Factor Authentication (MFA) Setup:</h3>
+                <p class="text-sm text-gray-600 mb-4">Please scan the QR code below with your authenticator app (e.g., Google Authenticator, Authy).</p>
+                <div class="flex justify-center">
+                    <img id="qrcode" src="" alt="MFA QR Code" class="p-2 border border-gray-300 rounded-md">
+                </div>
+                <div class="mt-4">
+                    <label for="mfa_code" class="block text-sm font-medium text-gray-700">Authenticator Code</label>
+                    <input type="text" id="mfa_code" name="mfa_code" required class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 transition-colors duration-200" maxlength="6">
+                    <p id="mfa-error" class="error-message hidden">Invalid authenticator code.</p>
+                </div>
+            </div>
+            {{end}}
+
             <div>
                 <button type="submit" class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors duration-200">
                     Set Password
@@ -57,6 +72,7 @@
             </div>
         </form>
     </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
     <script>
         const passwordPolicyDetails = {
             "none": { minLength: 0 },
@@ -70,7 +86,7 @@
             const requirements = passwordPolicyDetails[policy];
 
             if (policy === "none") {
-                return;
+                return true;
             }
 
             const isLengthValid = password.length >= requirements.minLength;
@@ -107,11 +123,34 @@
                 icon.classList.add('fa-times-circle');
             }
         }
+        
+        function generateQRCode(url) {
+            new QRious({
+                element: document.getElementById('qrcode'),
+                value: url,
+                size: 200
+            });
+        }
 
-        function validatePassword(event) {
+        async function validateMfa(code) {
+            const token = document.querySelector('input[name="token"]').value;
+            const response = await fetch('/verify-mfa', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `token=${token}&mfa_code=${code}`
+            });
+            return response.ok;
+        }
+
+        async function validateForm(event) {
             const password = document.getElementById('password').value;
             const confirmPassword = document.getElementById('confirm_password').value;
             const matchError = document.getElementById('match-error');
+            const mfaCode = document.getElementById('mfa_code') ? document.getElementById('mfa_code').value : '';
+            const mfaError = document.getElementById('mfa-error');
+            const mfaEnabled = document.getElementById('qrcode') !== null;
 
             if (password !== confirmPassword) {
                 matchError.classList.remove('hidden');
@@ -130,8 +169,32 @@
                 }
             }
 
+            if (mfaEnabled) {
+                const isMfaValid = await validateMfa(mfaCode);
+                if (!isMfaValid) {
+                    mfaError.classList.remove('hidden');
+                    event.preventDefault();
+                    return false;
+                }
+                mfaError.classList.add('hidden');
+            }
+
             return true;
         }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const mfaEnabled = document.getElementById('qrcode') !== null;
+            if (mfaEnabled) {
+                const token = document.querySelector('input[name="token"]').value;
+                const url = new URL(window.location.href);
+                url.pathname = '/mfa-qrcode';
+                url.searchParams.set('token', token);
+                // In a real implementation, the QR code URL would be passed from the server,
+                // but for this example, we generate it on the client side.
+                // Assuming the server provides `{{.MfaQRCodeURL}}`.
+                generateQRCode("{{.MfaQRCodeURL}}");
+            }
+        });
     </script>
 </body>
 </html>

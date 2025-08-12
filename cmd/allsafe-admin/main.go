@@ -17,6 +17,7 @@ import (
     "github.com/spf13/cobra"
     _ "github.com/mattn/go-sqlite3"
     "gopkg.in/yaml.v2"
+    "allsafe-access/pkg/mfa"
 )
 
 // dbPath is the hardcoded path to the SQLite database file.
@@ -28,6 +29,9 @@ var role string
 // passwordPolicy will hold the value of the --policy flag for user creation.
 var passwordPolicy string
 
+// mfaType will hold the value of the --mfa flag for user creation.
+var mfaType string
+
 // New flag to hold the proxy's URL
 var proxyURL string
 
@@ -38,6 +42,7 @@ var secretKey = []byte("a-very-long-and-secure-secret-key-for-signing-tokens")
 type tokenPayload struct {
     Username       string `json:"username"`
     PasswordPolicy string `json:"policy"`
+    MfaSecret      string `json:"mfa_secret,omitempty"`
     Nonce          string `json:"nonce"`
 }
 
@@ -69,13 +74,27 @@ var userAddCmd = &cobra.Command{
     Args:  cobra.ExactArgs(1),
     Run: func(cmd *cobra.Command, args []string) {
         username := args[0]
-        log.Printf("Attempting to add new user: %s with role: %s and policy: %s\n", username, role, passwordPolicy)
+        log.Printf("Attempting to add new user: %s with role: %s, policy: %s, and MFA: %s\n", username, role, passwordPolicy, mfaType)
 
         db, err := sql.Open("sqlite3", dbPath)
         if err != nil {
             log.Fatalf("Failed to open database: %v", err)
         }
         defer db.Close()
+
+        tx, err := db.Begin()
+        if err != nil {
+            log.Fatalf("Failed to begin transaction: %v", err)
+        }
+        defer tx.Rollback()
+
+        var mfaSecret string
+        if mfaType == "totp" {
+            mfaSecret, err = mfa.GenerateTOTPSecret()
+            if err != nil {
+                log.Fatalf("Failed to generate TOTP secret: %v", err)
+            }
+        }
 
         // Generate a new, unique nonce for the token.
         nonceBytes := make([]byte, 16)
@@ -84,14 +103,15 @@ var userAddCmd = &cobra.Command{
         }
         nonce := base64.URLEncoding.EncodeToString(nonceBytes)
 
-        // Create a signed token that includes the policy.
-        token, err := createSignedToken(username, passwordPolicy, nonce)
+        // Create a signed token that includes the policy and MFA secret.
+        token, err := createSignedToken(username, passwordPolicy, mfaSecret, nonce)
         if err != nil {
             log.Fatalf("Failed to create signed token: %v", err)
         }
 
-        insertSQL := `INSERT INTO users (username, role, invite_token) VALUES (?, ?, ?)`
-        _, err = db.Exec(insertSQL, username, role, token)
+        // Insert user without the mfa_enabled column, since it does not exist in your schema.
+        insertUserSQL := `INSERT INTO users (username, role, invite_token) VALUES (?, ?, ?)`
+        _, err = tx.Exec(insertUserSQL, username, role, token)
         if err != nil {
             if strings.Contains(err.Error(), "UNIQUE constraint failed: users.username") {
                 log.Fatalf("Error: User '%s' already exists.", username)
@@ -99,18 +119,31 @@ var userAddCmd = &cobra.Command{
             log.Fatalf("Failed to insert new user: %v", err)
         }
 
+        if mfaType == "totp" {
+            insertMfaSQL := `INSERT INTO mfa_devices (user_id, mfa_type_id, config, is_enabled) 
+                            VALUES ((SELECT id FROM users WHERE username = ?), (SELECT id FROM mfa_types WHERE type_name = ?), ?, ?)`
+            _, err = tx.Exec(insertMfaSQL, username, mfaType, mfaSecret, 1)
+            if err != nil {
+                log.Fatalf("Failed to insert MFA device: %v", err)
+            }
+        }
+
         auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
         actorUsername := "admin"
-        details := fmt.Sprintf(`{"invite_token": "%s", "role": "%s", "password_policy": "%s"}`, token, role, passwordPolicy)
-        _, err = db.Exec(auditLogSQL, "user_add", actorUsername, username, details)
+        details := fmt.Sprintf(`{"invite_token": "%s", "role": "%s", "password_policy": "%s", "mfa_type": "%s"}`, token, role, passwordPolicy, mfaType)
+        _, err = tx.Exec(auditLogSQL, "user_add", actorUsername, username, details)
         if err != nil {
             log.Printf("Warning: Failed to write to audit logs: %v", err)
         }
 
-        // The invitation URL now points to the proxy server
+        err = tx.Commit()
+        if err != nil {
+            log.Fatalf("Failed to commit transaction: %v", err)
+        }
+
         inviteURL := fmt.Sprintf("%s/invite?token=%s", proxyURL, token)
 
-        fmt.Printf("User '%s' added successfully with role '%s' and password policy '%s'!\n", username, role, passwordPolicy)
+        fmt.Printf("User '%s' added successfully with role '%s', password policy '%s', and MFA '%s'!\n", username, role, passwordPolicy, mfaType)
         fmt.Printf("Invitation URL: %s\n", inviteURL)
     },
 }
@@ -139,9 +172,15 @@ var userDeleteCmd = &cobra.Command{
         }
         defer db.Close()
 
+        tx, err := db.Begin()
+        if err != nil {
+            log.Fatalf("Failed to begin transaction: %v", err)
+        }
+        defer tx.Rollback()
+
         // Delete the user from the 'users' table.
         deleteSQL := `DELETE FROM users WHERE username = ?`
-        result, err := db.Exec(deleteSQL, username)
+        result, err := tx.Exec(deleteSQL, username)
         if err != nil {
             log.Fatalf("Failed to delete user: %v", err)
         }
@@ -154,9 +193,14 @@ var userDeleteCmd = &cobra.Command{
         // Log the action in the 'audit_logs' table.
         auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
         actorUsername := "admin"
-        _, err = db.Exec(auditLogSQL, "user_delete", actorUsername, username, "{}")
+        _, err = tx.Exec(auditLogSQL, "user_delete", actorUsername, username, "{}")
         if err != nil {
             log.Printf("Warning: Failed to write to audit logs: %v", err)
+        }
+
+        err = tx.Commit()
+        if err != nil {
+            log.Fatalf("Failed to commit transaction: %v", err)
         }
 
         fmt.Printf("User '%s' deleted successfully.\n", username)
@@ -178,14 +222,20 @@ var userResetPasswordCmd = &cobra.Command{
         }
         defer db.Close()
 
+        tx, err := db.Begin()
+        if err != nil {
+            log.Fatalf("Failed to begin transaction: %v", err)
+        }
+        defer tx.Rollback()
+
         // Check if the user exists first.
         var exists bool
         querySQL := `SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)`
-        err = db.QueryRow(querySQL, username).Scan(&exists)
+        err = tx.QueryRow(querySQL, username).Scan(&exists)
         if err != nil || !exists {
             log.Fatalf("Error: User '%s' not found.", username)
         }
-        
+         
         // Generate a new, unique nonce for the token.
         nonceBytes := make([]byte, 16)
         if _, err := rand.Read(nonceBytes); err != nil {
@@ -193,15 +243,15 @@ var userResetPasswordCmd = &cobra.Command{
         }
         nonce := base64.URLEncoding.EncodeToString(nonceBytes)
 
-        // Create a new signed token.
-        token, err := createSignedToken(username, "none", nonce)
+        // Create a new signed token without MFA secret for password reset.
+        token, err := createSignedToken(username, "none", "", nonce)
         if err != nil {
             log.Fatalf("Failed to create signed token: %v", err)
         }
 
         // Update the user's record with the new token and null password hash.
         updateSQL := `UPDATE users SET password_hash = NULL, invite_token = ? WHERE username = ?`
-        _, err = db.Exec(updateSQL, token, username)
+        _, err = tx.Exec(updateSQL, token, username)
         if err != nil {
             log.Fatalf("Failed to reset password for user: %v", err)
         }
@@ -210,9 +260,14 @@ var userResetPasswordCmd = &cobra.Command{
         auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
         actorUsername := "admin"
         details := fmt.Sprintf(`{"invite_token": "%s"}`, token)
-        _, err = db.Exec(auditLogSQL, "password_reset", actorUsername, username, details)
+        _, err = tx.Exec(auditLogSQL, "password_reset", actorUsername, username, details)
         if err != nil {
             log.Printf("Warning: Failed to write to audit logs: %v", err)
+        }
+
+        err = tx.Commit()
+        if err != nil {
+            log.Fatalf("Failed to commit transaction: %v", err)
         }
 
         inviteURL := fmt.Sprintf("%s/invite?token=%s", proxyURL, token)
@@ -235,6 +290,7 @@ var userListCmd = &cobra.Command{
         }
         defer db.Close()
 
+        // Querying without the mfa_enabled column.
         rows, err := db.Query(`SELECT id, username, role FROM users`)
         if err != nil {
             log.Fatalf("Failed to query users: %v", err)
@@ -242,7 +298,7 @@ var userListCmd = &cobra.Command{
         defer rows.Close()
 
         fmt.Printf("ID\tUsername\tRole\n")
-        fmt.Println("--------------------------------")
+        fmt.Println("-------------------------------------------------")
 
         for rows.Next() {
             var id int
@@ -277,7 +333,9 @@ var userGetCmd = &cobra.Command{
         var id int
         var passwordHash, inviteToken sql.NullString
         var role, createdAt string
+        var mfaEnabled sql.NullBool // Using NullBool to handle potential absence of the column
 
+        // Query for mfa status separately from the users table.
         querySQL := `SELECT id, role, password_hash, invite_token, created_at FROM users WHERE username = ?`
         err = db.QueryRow(querySQL, username).Scan(&id, &role, &passwordHash, &inviteToken, &createdAt)
         if err != nil {
@@ -286,12 +344,24 @@ var userGetCmd = &cobra.Command{
             }
             log.Fatalf("Failed to get user details: %v", err)
         }
+        
+        // Check if MFA is enabled by querying the mfa_devices table
+        mfaEnabled = sql.NullBool{Bool: false, Valid: true}
+        var mfaTypeCount int
+        mfaQuerySQL := `SELECT COUNT(*) FROM mfa_devices WHERE user_id = ? AND is_enabled = 1`
+        err = db.QueryRow(mfaQuerySQL, id).Scan(&mfaTypeCount)
+        if err != nil {
+            log.Printf("Warning: Failed to check MFA status for user '%s': %v", username, err)
+        } else if mfaTypeCount > 0 {
+            mfaEnabled.Bool = true
+        }
 
         fmt.Printf("User Details for '%s'\n", username)
         fmt.Println("--------------------------------")
         fmt.Printf("ID:\t\t%d\n", id)
         fmt.Printf("Username:\t%s\n", username)
         fmt.Printf("Role:\t\t%s\n", role)
+        fmt.Printf("MFA Enabled:\t%t\n", mfaEnabled.Bool)
         fmt.Printf("Created At:\t%s\n", createdAt)
 
         if passwordHash.Valid {
@@ -309,10 +379,11 @@ var userGetCmd = &cobra.Command{
 }
 
 // createSignedToken generates a base64-encoded, HMAC-signed token.
-func createSignedToken(username, policy, nonce string) (string, error) {
+func createSignedToken(username, policy, mfaSecret, nonce string) (string, error) {
     payload := tokenPayload{
         Username:       username,
         PasswordPolicy: policy,
+        MfaSecret:      mfaSecret,
         Nonce:          nonce,
     }
     payloadBytes, err := json.Marshal(payload)
@@ -339,25 +410,44 @@ func createDatabaseSchema() {
         log.Fatalf("Failed to open database for schema creation: %v", err)
     }
     defer db.Close()
-
+    
+    // The users table definition now matches your existing schema.
     usersTableSQL := `
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT NOT NULL UNIQUE,
-        role TEXT NOT NULL,
         password_hash TEXT,
+        role TEXT NOT NULL,
         invite_token TEXT UNIQUE,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );`
 
     auditLogsTableSQL := `
     CREATE TABLE IF NOT EXISTS audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         action TEXT NOT NULL,
-        actor_username TEXT,
+        actor_username TEXT NOT NULL,
         target_username TEXT,
-        details TEXT,
-        timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        details TEXT
+    );`
+
+    mfaTypesTableSQL := `
+    CREATE TABLE IF NOT EXISTS mfa_types (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type_name TEXT NOT NULL UNIQUE
+    );`
+
+    mfaDevicesTableSQL := `
+    CREATE TABLE IF NOT EXISTS mfa_devices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        mfa_type_id INTEGER NOT NULL,
+        config TEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        is_enabled INTEGER NOT NULL DEFAULT 1,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (mfa_type_id) REFERENCES mfa_types(id)
     );`
 
     _, err = db.Exec(usersTableSQL)
@@ -368,6 +458,23 @@ func createDatabaseSchema() {
     _, err = db.Exec(auditLogsTableSQL)
     if err != nil {
         log.Fatalf("Failed to create 'audit_logs' table: %v", err)
+    }
+
+    _, err = db.Exec(mfaTypesTableSQL)
+    if err != nil {
+        log.Fatalf("Failed to create 'mfa_types' table: %v", err)
+    }
+
+    _, err = db.Exec(mfaDevicesTableSQL)
+    if err != nil {
+        log.Fatalf("Failed to create 'mfa_devices' table: %v", err)
+    }
+
+    // Insert default MFA types if they don't exist
+    insertMfaTypesSQL := `INSERT OR IGNORE INTO mfa_types (type_name) VALUES ('totp'), ('hotp');`
+    _, err = db.Exec(insertMfaTypesSQL)
+    if err != nil {
+        log.Fatalf("Failed to insert default MFA types: %v", err)
     }
 }
 
@@ -409,6 +516,7 @@ func init() {
 
     userAddCmd.Flags().StringVar(&role, "role", "user", "The role of the new user")
     userAddCmd.Flags().StringVar(&passwordPolicy, "policy", "none", "The password complexity policy (none, medium, hard)")
+    userAddCmd.Flags().StringVar(&mfaType, "mfa", "none", "The MFA type for the new user (totp, hotp, none)")
 
     // New persistent flag for the proxy URL.
     // The default is now set dynamically above.
