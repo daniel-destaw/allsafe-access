@@ -25,8 +25,7 @@ import (
 	"time"
 
 	"allsafe-access/pkg/auth"
-	"allsafe-access/pkg/db"
-	"allsafe-access/pkg/mfa" // New import
+	"allsafe-access/pkg/mfa"
 
 	"golang.org/x/crypto/bcrypt"
 	_ "github.com/mattn/go-sqlite3"
@@ -56,7 +55,7 @@ var cfgFile string
 var authChecker *auth.AuthChecker
 var authenticatedUsers = make(map[string]*auth.UserPermissions)
 var authMutex sync.RWMutex
-var database *db.Database
+var database *sql.DB
 
 // Moved constants and variables from allsafe-admin
 var secretKey = []byte("a-very-long-and-secure-secret-key-for-signing-tokens")
@@ -183,7 +182,7 @@ func init() {
 	viper.BindPFlag("users_config_path", rootCmd.Flags().Lookup("users-db"))
 	rootCmd.Flags().String("roles-dir", "", "Directory containing the roles/*.yaml files")
 	viper.BindPFlag("roles_config_dir", rootCmd.Flags().Lookup("roles-dir"))
-	rootCmd.Flags().String("invite-url-base", "", "The base URL for the invitation links (e.g., https://proxy.example.com)")
+	rootCmd.Flags().String("invite-url-base", "", "The base URL for the invitation links (e.g., https://localhost:8080)")
 	viper.BindPFlag("invite_url_base", rootCmd.Flags().Lookup("invite-url-base"))
 
 	viper.SetDefault("listen_address", ":8080")
@@ -221,7 +220,7 @@ func runProxy(cmd *cobra.Command, args []string) {
 	log.Printf("Loaded Proxy Config: %+v\n", proxyCfg)
 
 	var err error
-	database, err = db.NewDatabase(proxyCfg.UsersConfigPath)
+	database, err = sql.Open("sqlite3", proxyCfg.UsersConfigPath)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -261,10 +260,8 @@ func runProxy(cmd *cobra.Command, args []string) {
 		HandshakeTimeout: 45 * time.Second,
 	}
 
-	// Create the ServeMux
 	mux := http.NewServeMux()
 
-	// Add handlers for your API endpoints
 	mux.HandleFunc(registerEndpoint, handleRegister)
 	mux.HandleFunc(heartbeatEndpoint, handleHeartbeat)
 	mux.HandleFunc(runCommandEndpoint, handleRunCommand)
@@ -274,7 +271,6 @@ func runProxy(cmd *cobra.Command, args []string) {
 	mux.HandleFunc(inviteEndpoint, handleInvite)
 	mux.HandleFunc(setPasswordEndpoint, handleSetPassword)
 	
-	// **NEW:** Add a file server to serve static assets from the templates directory.
 	fs := http.FileServer(http.Dir("cmd/allsafe-proxy/templates"))
 	mux.Handle("/static/", http.StripPrefix("/static/", fs))
 
@@ -301,7 +297,6 @@ func runProxy(cmd *cobra.Command, args []string) {
 	server.Shutdown(context.Background())
 }
 
-// handleInvite handles the invitation link by serving the password creation form.
 func handleInvite(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -337,7 +332,6 @@ func handleInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NEW: Check if MFA is enabled and generate the QR code URL
 	var mfaQRCodeURL string
 	mfaEnabled := payload.MfaSecret != ""
 	if mfaEnabled {
@@ -370,7 +364,6 @@ func handleInvite(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSetPassword handles the form submission to set a user's new password.
 func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -399,7 +392,6 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NEW: If MFA is enabled, validate the MFA code
 	if payload.MfaSecret != "" {
 		if mfaCode == "" {
 			http.Error(w, "MFA code is required.", http.StatusBadRequest)
@@ -462,7 +454,6 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// NEW: Update MFA device status to enabled
 	if payload.MfaSecret != "" {
 		updateMfaSQL := `UPDATE mfa_devices SET is_enabled = 1 WHERE user_id = (SELECT id FROM users WHERE username = ?) AND config = ?`
 		_, err = tx.ExecContext(context.Background(), updateMfaSQL, payload.Username, payload.MfaSecret)
@@ -496,7 +487,6 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	`)
 }
 
-// createSignedToken generates a base64-encoded, HMAC-signed token.
 func createSignedToken(username, policy, mfaSecret, nonce string) (string, error) {
 	payload := tokenPayload{
 		Username:       username,
@@ -520,7 +510,6 @@ func createSignedToken(username, policy, mfaSecret, nonce string) (string, error
 	return token, nil
 }
 
-// validateAndDecodeToken validates the HMAC signature and decodes the token payload.
 func validateAndDecodeToken(token string) (*tokenPayload, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 {
@@ -553,7 +542,6 @@ func validateAndDecodeToken(token string) (*tokenPayload, error) {
 	return &payload, nil
 }
 
-// validatePasswordComplexity checks if the given password meets the specified policy requirements.
 func validatePasswordComplexity(password, policy string) error {
 	details, ok := passwordPolicyDetails[policy]
 	if !ok {
@@ -666,6 +654,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		TotpCode string `json:"totp_code,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -680,6 +669,26 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
 		log.Printf("Proxy: Authentication failed for user '%s': %v", req.Username, err)
 		return
+	}
+
+	mfaEnabled, mfaSecret, err := mfa.IsTOTPEnabledForUser(database, userObj.ID)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		log.Printf("Proxy: Failed to check MFA status for user '%s': %v", req.Username, err)
+		return
+	}
+
+	if mfaEnabled {
+		if req.TotpCode == "" {
+			http.Error(w, "MFA required", http.StatusForbidden)
+			log.Printf("Proxy: Authentication failed for user '%s' - MFA required but not provided.", req.Username)
+			return
+		}
+		if !mfa.ValidateTOTP(req.TotpCode, mfaSecret) {
+			http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
+			log.Printf("Proxy: Authentication failed for user '%s' - invalid TOTP code.", req.Username)
+			return
+		}
 	}
 
 	authMutex.Lock()
@@ -838,10 +847,11 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// This goroutine reads from the CLI and forwards to the agent.
 	go func() {
 		defer wg.Done()
 		for {
-			_, message, err := cliWs.ReadMessage()
+			messageType, message, err := cliWs.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					log.Printf("Proxy: CLI WebSocket for agent %s (user %s) closed normally: %v", agent.ID, userID, err)
@@ -851,17 +861,18 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 				agentWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Client disconnected"))
 				return
 			}
-			if err := agentWs.WriteMessage(websocket.BinaryMessage, message); err != nil {
-				log.Printf("Proxy: Error writing to Agent WebSocket (as BinaryMessage) for agent %s (user %s): %v", agent.ID, userID, err)
+			if err := agentWs.WriteMessage(messageType, message); err != nil {
+				log.Printf("Proxy: Error writing to Agent WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
 				return
 			}
 		}
 	}()
 
+	// This is the corrected goroutine. It reads from the agent and forwards to the CLI.
 	go func() {
 		defer wg.Done()
 		for {
-			_, message, err := agentWs.ReadMessage()
+			messageType, message, err := agentWs.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					log.Printf("Proxy: Agent WebSocket for agent %s (user %s) closed normally: %v", agent.ID, userID, err)
@@ -871,8 +882,9 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 				cliWs.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Agent disconnected"))
 				return
 			}
-			if err := cliWs.WriteMessage(websocket.BinaryMessage, message); err != nil {
-				log.Printf("Proxy: Error writing to CLI WebSocket (as BinaryMessage) for agent %s (user %s): %v", agent.ID, userID, err)
+			// Write the message back to the CLI WebSocket connection
+			if err := cliWs.WriteMessage(messageType, message); err != nil {
+				log.Printf("Proxy: Error writing to CLI WebSocket for agent %s (user %s): %v", agent.ID, userID, err)
 				return
 			}
 		}
