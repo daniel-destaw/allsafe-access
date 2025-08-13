@@ -63,13 +63,21 @@ type Config struct {
 }
 
 // ActiveSession represents a session returned by the proxy's /admin/sessions endpoint.
-// This is an updated struct to match the new API response from the proxy.
 type ActiveSession struct {
-	SessionID string    `json:"session_id"`
-	UserID    string    `json:"user_id"`
-	NodeID    string    `json:"node_id"`
-	LoginUser string    `json:"login_user"`
-	StartTime time.Time `json:"start_time"`
+	UserID    string `json:"user_id"`
+	NodeID    string `json:"node_id"`
+	LoginUser string `json:"login_user"`
+	Duration  string `json:"duration"`
+}
+
+// AuditEvent represents an audit log entry.
+type AuditEvent struct {
+	Timestamp   time.Time `json:"timestamp"`
+	ComponentID string    `json:"component_id"`
+	UserID      string    `json:"user_id"`
+	EventType   string    `json:"event_type"`
+	Action      string    `json:"action"`
+	Details     string    `json:"details"`
 }
 
 // rootCmd represents the base command for the admin CLI.
@@ -93,6 +101,13 @@ var sessionsCmd = &cobra.Command{
 	Use:   "sessions",
 	Short: "Manage active user sessions",
 	Long:  "Commands for listing and terminating active user sessions.",
+}
+
+// auditCmd is the parent command for all audit log-related actions.
+var auditCmd = &cobra.Command{
+	Use:   "audit",
+	Short: "Manage and view audit logs",
+	Long:  "Commands for fetching and filtering audit logs.",
 }
 
 // userAddCmd adds a new user with a generated invitation token.
@@ -156,13 +171,9 @@ var userAddCmd = &cobra.Command{
 			}
 		}
 
-		auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
-		actorUsername := "admin"
-		details := fmt.Sprintf(`{"invite_token": "%s", "role": "%s", "password_policy": "%s", "mfa_type": "%s"}`, token, role, passwordPolicy, mfaType)
-		_, err = tx.Exec(auditLogSQL, "user_add", actorUsername, username, details)
-		if err != nil {
-			log.Printf("Warning: Failed to write to audit logs: %v", err)
-		}
+		// Note: userAddCmd directly modifies the 'users' table, and the proxy's handleInvite
+		// will log the ADMIN_ACTION 'user_invite' when the invitation link is accessed.
+		// No direct audit_logs insertion here since the proxy handles the comprehensive logging for invite.
 
 		err = tx.Commit()
 		if err != nil {
@@ -218,13 +229,9 @@ var userDeleteCmd = &cobra.Command{
 			log.Fatalf("Error: User '%s' not found.", username)
 		}
 
-		// Log the action in the 'audit_logs' table.
-		auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
-		actorUsername := "admin"
-		_, err = tx.Exec(auditLogSQL, "user_delete", actorUsername, username, "{}")
-		if err != nil {
-			log.Printf("Warning: Failed to write to audit logs: %v", err)
-		}
+		// No direct audit_logs insertion here, as the proxy handles logging admin actions
+		// (e.g., if you introduce an admin API to delete users via the proxy).
+		// For CLI-only actions, you might consider direct logging if they don't go through the proxy.
 
 		err = tx.Commit()
 		if err != nil {
@@ -284,14 +291,7 @@ var userResetPasswordCmd = &cobra.Command{
 			log.Fatalf("Failed to reset password for user: %v", err)
 		}
 
-		// Log the action in the 'audit_logs' table.
-		auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
-		actorUsername := "admin"
-		details := fmt.Sprintf(`{"invite_token": "%s"}`, token)
-		_, err = tx.Exec(auditLogSQL, "password_reset", actorUsername, username, details)
-		if err != nil {
-			log.Printf("Warning: Failed to write to audit logs: %v", err)
-		}
+		// No direct audit_logs insertion here; the proxy's `handleSetPassword` will log this when the user sets their password.
 
 		err = tx.Commit()
 		if err != nil {
@@ -534,15 +534,15 @@ var listActiveSessionsCmd = &cobra.Command{
 		}
 
 		fmt.Println("Active Sessions:")
-		fmt.Println("------------------------------------------------------------------------------------------------------------------")
-		fmt.Printf("%-38s %-15s %-15s %-20s\n", "SESSION ID", "USER ID", "NODE ID", "START TIME")
-		fmt.Println("------------------------------------------------------------------------------------------------------------------")
+		fmt.Println("----------------------------------------------------------------------")
+		fmt.Printf("%-15s %-15s %-20s %s\n", "USER ID", "NODE ID", "LOGIN USER", "DURATION")
+		fmt.Println("----------------------------------------------------------------------")
 		for _, session := range sessions {
-			fmt.Printf("%-38s %-15s %-15s %-20s\n",
-				session.SessionID,
+			fmt.Printf("%-15s %-15s %-20s %s\n",
 				session.UserID,
 				session.NodeID,
-				session.StartTime.Format("2006-01-02 15:04:05"))
+				session.LoginUser,
+				session.Duration)
 		}
 	},
 }
@@ -597,6 +597,106 @@ var listAuthenticatedUsersCmd = &cobra.Command{
 	},
 }
 
+var (
+	auditEventType string
+	auditUserID    string
+	auditLimit     int
+	auditSearch    string
+)
+
+// listAuditLogsCmd now fetches and displays audit logs from the local database.
+var listAuditLogsCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List audit logs from the local database",
+	Run: func(cmd *cobra.Command, args []string) {
+		log.Println("Attempting to fetch audit logs from local database...")
+
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			log.Fatalf("Failed to open database: %v", err)
+		}
+		defer db.Close()
+
+		var queryBuilder strings.Builder
+		queryBuilder.WriteString("SELECT timestamp, component_id, user_id, event_type, action, details FROM audit_events")
+
+		var whereClauses []string
+		var queryArgs []interface{}
+
+		if auditEventType != "" {
+			whereClauses = append(whereClauses, "event_type = ?")
+			queryArgs = append(queryArgs, auditEventType)
+		}
+		if auditUserID != "" {
+			whereClauses = append(whereClauses, "user_id = ?")
+			queryArgs = append(queryArgs, auditUserID)
+		}
+		if auditSearch != "" {
+			// Search for a substring in either action or details
+			whereClauses = append(whereClauses, "(action LIKE ? OR details LIKE ?)")
+			searchTerm := fmt.Sprintf("%%%s%%", auditSearch)
+			queryArgs = append(queryArgs, searchTerm, searchTerm)
+		}
+
+		if len(whereClauses) > 0 {
+			queryBuilder.WriteString(" WHERE ")
+			queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
+		}
+
+		queryBuilder.WriteString(" ORDER BY timestamp DESC")
+
+		// Add limit
+		if auditLimit > 0 {
+			queryBuilder.WriteString(" LIMIT ?")
+			queryArgs = append(queryArgs, auditLimit)
+		}
+		
+		query := queryBuilder.String()
+		
+		rows, err := db.Query(query, queryArgs...)
+		if err != nil {
+			log.Fatalf("Failed to query audit logs: %v", err)
+		}
+		defer rows.Close()
+
+		var auditEvents []AuditEvent
+		for rows.Next() {
+			var event AuditEvent
+			// Using sql.NullString to handle potential NULL values in user_id or details
+			var userID, details sql.NullString
+			if err := rows.Scan(&event.Timestamp, &event.ComponentID, &userID, &event.EventType, &event.Action, &details); err != nil {
+				log.Fatalf("Failed to scan row: %v", err)
+			}
+			event.UserID = userID.String
+			event.Details = details.String
+			auditEvents = append(auditEvents, event)
+		}
+		
+		if err := rows.Err(); err != nil {
+			log.Fatalf("Error during rows iteration: %v", err)
+		}
+
+		if len(auditEvents) == 0 {
+			fmt.Println("No audit logs found matching the criteria.")
+			return
+		}
+		
+		fmt.Println("Audit Logs:")
+		fmt.Println("---------------------------------------------------------------------------------------------------------------------------")
+		fmt.Printf("%-20s | %-15s | %-15s | %-18s | %-15s | %s\n", "TIMESTAMP", "COMPONENT", "USER", "EVENT TYPE", "ACTION", "DETAILS")
+		fmt.Println("---------------------------------------------------------------------------------------------------------------------------")
+		for _, event := range auditEvents {
+			fmt.Printf("%-20s | %-15s | %-15s | %-18s | %-15s | %s\n",
+				event.Timestamp.Format("2006-01-02 15:04:05"),
+				event.ComponentID,
+				event.UserID,
+				event.EventType,
+				event.Action,
+				event.Details)
+		}
+	},
+}
+
 // createSignedToken generates a base64-encoded, HMAC-signed token.
 func createSignedToken(username, policy, mfaSecret, nonce string) (string, error) {
 	payload := tokenPayload{
@@ -640,15 +740,7 @@ func createDatabaseSchema() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );`
 
-	auditLogsTableSQL := `
-    CREATE TABLE IF NOT EXISTS audit_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        action TEXT NOT NULL,
-        actor_username TEXT NOT NULL,
-        target_username TEXT,
-        details TEXT
-    );`
+	// REMOVED audit_logs table creation
 
 	mfaTypesTableSQL := `
     CREATE TABLE IF NOT EXISTS mfa_types (
@@ -668,14 +760,29 @@ func createDatabaseSchema() {
         FOREIGN KEY (mfa_type_id) REFERENCES mfa_types(id)
     );`
 
+	componentsTableSQL := `
+    CREATE TABLE IF NOT EXISTS components (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        labels TEXT,
+        last_seen_at DATETIME NOT NULL
+    );`
+
+	auditEventsTableSQL := `
+    CREATE TABLE IF NOT EXISTS audit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp DATETIME NOT NULL,
+        component_id TEXT NOT NULL,
+        user_id TEXT,
+        event_type TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT
+    );`
+
 	_, err = db.Exec(usersTableSQL)
 	if err != nil {
 		log.Fatalf("Failed to create 'users' table: %v", err)
-	}
-
-	_, err = db.Exec(auditLogsTableSQL)
-	if err != nil {
-		log.Fatalf("Failed to create 'audit_logs' table: %v", err)
 	}
 
 	_, err = db.Exec(mfaTypesTableSQL)
@@ -686,6 +793,16 @@ func createDatabaseSchema() {
 	_, err = db.Exec(mfaDevicesTableSQL)
 	if err != nil {
 		log.Fatalf("Failed to create 'mfa_devices' table: %v", err)
+	}
+
+	_, err = db.Exec(componentsTableSQL)
+	if err != nil {
+		log.Fatalf("Failed to create 'components' table: %v", err)
+	}
+
+	_, err = db.Exec(auditEventsTableSQL)
+	if err != nil {
+		log.Fatalf("Failed to create 'audit_events' table: %v", err)
 	}
 
 	// Insert default MFA types if they don't exist
@@ -726,6 +843,7 @@ func init() {
 
 	rootCmd.AddCommand(userCmd)
 	rootCmd.AddCommand(sessionsCmd)
+	rootCmd.AddCommand(auditCmd) // Add the new audit command
 
 	userCmd.AddCommand(userAddCmd)
 	userCmd.AddCommand(userDeleteCmd)
@@ -735,7 +853,9 @@ func init() {
 
 	sessionsCmd.AddCommand(terminateCmd)
 	sessionsCmd.AddCommand(listActiveSessionsCmd)
-    sessionsCmd.AddCommand(listAuthenticatedUsersCmd)
+	sessionsCmd.AddCommand(listAuthenticatedUsersCmd)
+
+	auditCmd.AddCommand(listAuditLogsCmd) // Add the list sub-command to audit
 
 	userAddCmd.Flags().StringVar(&role, "role", "user", "The role of the new user")
 	userAddCmd.Flags().StringVar(&passwordPolicy, "policy", "none", "The password complexity policy (none, medium, hard)")
@@ -745,6 +865,12 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&proxyURL, "proxy-url", proxyURL, "The base URL of the Allsafe Proxy server for invitation links")
 	// New persistent flag for the CA certificate path.
 	rootCmd.PersistentFlags().StringVar(&caCertPath, "cacert", "", "Path to the CA certificate file to trust for proxy connections")
+	
+	// Flags for the new audit list command
+	listAuditLogsCmd.Flags().StringVar(&auditEventType, "event-type", "", "Filter logs by event type (e.g., MEDIUM_AUDIT, ADMIN_ACTION, AUTHENTICATION, INTERACTIVE_SESSION)")
+	listAuditLogsCmd.Flags().StringVar(&auditUserID, "user-id", "", "Filter logs by user ID")
+	listAuditLogsCmd.Flags().StringVar(&auditSearch, "search", "", "Search logs for a keyword in the action or details fields (case-insensitive)")
+	listAuditLogsCmd.Flags().IntVar(&auditLimit, "limit", 10, "Limit the number of results returned (default 10)")
 }
 
 func main() {
