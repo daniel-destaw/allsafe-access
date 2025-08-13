@@ -369,9 +369,15 @@ func handleAuditEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleInvite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		http.Error(w, "Invitation token is missing.", http.StatusBadRequest)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "user_invite_failed", `{"reason": "token_missing"}`)
 		return
 	}
 
@@ -379,6 +385,7 @@ func handleInvite(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Invalid or expired invitation token.", http.StatusForbidden)
 		log.Printf("Token validation failed: %v", err)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "user_invite_failed", `{"reason": "invalid_token"}`)
 		return
 	}
 
@@ -400,6 +407,7 @@ func handleInvite(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Printf("Failed to query user by token for '%s': %v", payload.Username, err)
 		}
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "user_invite_failed", fmt.Sprintf(`{"reason": "token_invalid_or_used", "username": "%s"}`, payload.Username))
 		return
 	}
 
@@ -410,6 +418,7 @@ func handleInvite(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("Failed to generate MFA QR code: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			auditLog("allsafe-proxy", payload.Username, "ADMIN_ACTION", "user_invite_failed", `{"reason": "mfa_qrcode_error"}`)
 			return
 		}
 	}
@@ -428,6 +437,9 @@ func handleInvite(w http.ResponseWriter, r *http.Request) {
 		MfaQRCodeURL:   mfaQRCodeURL,
 	}
 
+	// Log a successful user invitation and the password policy
+	auditLog("allsafe-proxy", "allsafe-admin", "ADMIN_ACTION", "user_invite", fmt.Sprintf(`{"target_username": "%s", "password_policy": "%s", "mfa_enabled": %t}`, payload.Username, payload.PasswordPolicy, mfaEnabled))
+	
 	w.Header().Set("Content-Type", "text/html")
 	if err := inviteTemplate.Execute(w, data); err != nil {
 		log.Printf("Failed to execute template: %v", err)
@@ -448,11 +460,13 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 
 	if token == "" || password == "" || confirmPassword == "" {
 		http.Error(w, "Token, password, or confirm password missing.", http.StatusBadRequest)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "set_password_failed", `{"reason": "missing_fields"}`)
 		return
 	}
 
 	if password != confirmPassword {
 		http.Error(w, "Passwords do not match.", http.StatusBadRequest)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "set_password_failed", `{"reason": "passwords_do_not_match"}`)
 		return
 	}
 
@@ -460,16 +474,19 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Invalid or expired invitation token.", http.StatusForbidden)
 		log.Printf("Token validation failed: %v", err)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "set_password_failed", `{"reason": "invalid_token"}`)
 		return
 	}
 
 	if payload.MfaSecret != "" {
 		if mfaCode == "" {
 			http.Error(w, "MFA code is required.", http.StatusBadRequest)
+			auditLog("allsafe-proxy", payload.Username, "ADMIN_ACTION", "set_password_failed", `{"reason": "mfa_code_required"}`)
 			return
 		}
 		if !mfa.ValidateTOTP(mfaCode, payload.MfaSecret) {
 			http.Error(w, "Invalid MFA code.", http.StatusUnauthorized)
+			auditLog("allsafe-proxy", payload.Username, "ADMIN_ACTION", "set_password_failed", `{"reason": "invalid_mfa_code"}`)
 			return
 		}
 	}
@@ -487,12 +504,14 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	err = dbConnection.QueryRow(querySQL, payload.Username).Scan(&storedToken)
 	if err != nil || !storedToken.Valid || storedToken.String != token {
 		http.Error(w, "Invalid token or password already set.", http.StatusForbidden)
+		auditLog("allsafe-proxy", payload.Username, "ADMIN_ACTION", "set_password_failed", `{"reason": "token_invalid_or_used"}`)
 		return
 	}
 
 	if err := validatePasswordComplexity(password, payload.PasswordPolicy); err != nil {
 		log.Printf("Password validation failed for user '%s': %v", payload.Username, err)
 		http.Error(w, fmt.Sprintf("Password validation failed: %v", err), http.StatusBadRequest)
+		auditLog("allsafe-proxy", payload.Username, "ADMIN_ACTION", "set_password_failed", fmt.Sprintf(`{"reason": "password_complexity_failed", "error": "%v"}`, err))
 		return
 	}
 
@@ -541,8 +560,8 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log the password set action to the audit logs.
-	auditLog("allsafe-proxy", payload.Username, "password_set", "password_set", "{}")
+	// Log the password set action to the audit events.
+	auditLog("allsafe-proxy", payload.Username, "CONFIG_CHANGE", "password_set", `{"action_user": "self"}`)
 
 	fmt.Fprintf(w, `
 		<!DOCTYPE html>
@@ -733,6 +752,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		log.Printf("Proxy: Auth failed - could not decode body: %v", err)
+		auditLog("allsafe-proxy", "N/A", "MEDIUM_AUDIT", "login_failed", fmt.Sprintf(`{"reason": "invalid_request_body", "username": "%s"}`, req.Username))
 		return
 	}
 
@@ -742,7 +762,8 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
 		log.Printf("Proxy: Authentication failed for user '%s': %v", req.Username, err)
-		auditLog("allsafe-proxy", req.Username, "auth_failure", "authentication_failure", fmt.Sprintf(`{"reason": "%v"}`, err))
+		// Log failed authentication due to invalid credentials
+		auditLog("allsafe-proxy", req.Username, "MEDIUM_AUDIT", "login_failed", fmt.Sprintf(`{"reason": "%v"}`, err))
 		return
 	}
 
@@ -750,6 +771,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		log.Printf("Proxy: Failed to check MFA status for user '%s': %v", req.Username, err)
+		auditLog("allsafe-proxy", req.Username, "MEDIUM_AUDIT", "login_failed", `{"reason": "MFA_check_error"}`)
 		return
 	}
 
@@ -757,13 +779,15 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		if req.TotpCode == "" {
 			http.Error(w, "MFA required", http.StatusForbidden)
 			log.Printf("Proxy: Authentication failed for user '%s' - MFA required but not provided.", req.Username)
-			auditLog("allsafe-proxy", req.Username, "auth_failure", "authentication_failure", `{"reason": "MFA required but not provided"}`)
+			// Log failed authentication due to missing MFA
+			auditLog("allsafe-proxy", req.Username, "MEDIUM_AUDIT", "login_failed", `{"reason": "MFA_required_but_not_provided"}`)
 			return
 		}
 		if !mfa.ValidateTOTP(req.TotpCode, mfaSecret) {
 			http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
 			log.Printf("Proxy: Authentication failed for user '%s' - invalid TOTP code.", req.Username)
-			auditLog("allsafe-proxy", req.Username, "auth_failure", "authentication_failure", `{"reason": "Invalid TOTP code"}`)
+			// Log failed authentication due to invalid MFA
+			auditLog("allsafe-proxy", req.Username, "MEDIUM_AUDIT", "login_failed", `{"reason": "Invalid_TOTP_code"}`)
 			return
 		}
 	}
@@ -773,7 +797,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	authMutex.Unlock()
 
 	// Log successful authentication.
-	auditLog("allsafe-proxy", req.Username, "auth_success", "authentication_success", "{}")
+	auditLog("allsafe-proxy", req.Username, "MEDIUM_AUDIT", "login_successful", "{}")
 
 	response := map[string]string{
 		"message": "Authentication successful",
@@ -789,6 +813,8 @@ func handleListNodes(w http.ResponseWriter, r *http.Request) {
 	if username == "" {
 		http.Error(w, "Authentication token is missing", http.StatusUnauthorized)
 		log.Printf("Proxy: List nodes failed - no auth token provided.")
+		// Log unauthorized attempt to list nodes
+		auditLog("allsafe-proxy", "N/A", "MEDIUM_AUDIT", "list_nodes_denied", `{"reason": "no_auth_token"}`)
 		return
 	}
 
@@ -799,6 +825,8 @@ func handleListNodes(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		http.Error(w, "Authorization failed: User not authenticated", http.StatusForbidden)
 		log.Printf("Proxy: List nodes failed - user '%s' not found in authenticated sessions.", username)
+		// Log forbidden attempt to list nodes
+		auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "list_nodes_denied", `{"reason": "user_not_authenticated"}`)
 		return
 	}
 
@@ -830,7 +858,12 @@ func handleListNodes(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(authorizedAgents); err != nil {
 		log.Printf("Proxy: Failed to encode authorized agent list: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		// Log failure to encode list nodes response
+		auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "list_nodes_failed", fmt.Sprintf(`{"reason": "encode_error", "error": "%v"}`, err))
+		return
 	}
+	// Log successful list nodes operation
+	auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "list_nodes_successful", "{}")
 }
 
 func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
@@ -882,7 +915,7 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 	if !isAuthorized {
 		http.Error(w, fmt.Sprintf("User '%s' is not authorized to access node '%s' as user '%s'.", userID, nodeID, loginUser), http.StatusForbidden)
 		log.Printf("Proxy: User '%s' is not authorized to access node '%s' as '%s' based on their role.", userID, nodeID, loginUser)
-		auditLog("allsafe-proxy", userID, "interactive_session_denied", "interactive_session_denied", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s", "reason": "unauthorized"}`, nodeID, loginUser))
+		auditLog("allsafe-proxy", userID, "MEDIUM_AUDIT", "interactive_session_denied", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s", "reason": "unauthorized"}`, nodeID, loginUser))
 		return
 	}
 
@@ -915,11 +948,11 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 		sessionsMutex.Lock()
 		delete(activeSessions, sessionID)
 		sessionsMutex.Unlock()
-		auditLog("allsafe-proxy", userID, "interactive_session_end", "interactive_session_end", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, nodeID, loginUser))
+		auditLog("allsafe-proxy", userID, "MEDIUM_AUDIT", "interactive_session_end", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, nodeID, loginUser))
 	}()
 	
-	// NEW: Log the start of a new interactive session as a medium audit event.
-	auditLog("allsafe-proxy", userID, "interactive_session_start", "interactive_session_start", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, nodeID, loginUser))
+	// Log the start of a new interactive session as a medium audit event.
+	auditLog("allsafe-proxy", userID, "MEDIUM_AUDIT", "interactive_session_start", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, nodeID, loginUser))
 
 
 	agentWsURL := fmt.Sprintf("wss://%s:%d%s?user_id=%s&login_user=%s",
@@ -1109,6 +1142,7 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nodeID := req.NodeID
+	username := r.Header.Get("X-Auth-Token")
 
 	agentsMutex.RLock()
 	agent, ok := agents[nodeID]
@@ -1117,8 +1151,45 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		http.Error(w, "Node not found or not active", http.StatusNotFound)
 		log.Printf("Proxy: Attempted to run command on unknown node: %s", nodeID)
+		auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "run_command_failed", fmt.Sprintf(`{"reason": "node_not_found", "node_id": "%s", "command": "%s"}`, nodeID, req.Command))
 		return
 	}
+	
+	// Check for user permissions here
+	if username == "" {
+		http.Error(w, "Authentication token is missing", http.StatusUnauthorized)
+		log.Printf("Proxy: Run command failed - no auth token provided.")
+		auditLog("allsafe-proxy", "N/A", "MEDIUM_AUDIT", "run_command_denied", fmt.Sprintf(`{"reason": "no_auth_token", "command": "%s"}`, req.Command))
+		return
+	}
+
+	authMutex.RLock()
+	permissions, ok := authenticatedUsers[username]
+	authMutex.RUnlock()
+
+	if !ok {
+		http.Error(w, "Authorization failed: User not authenticated", http.StatusForbidden)
+		log.Printf("Proxy: Run command failed - user '%s' not found in authenticated sessions.", username)
+		auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "run_command_denied", fmt.Sprintf(`{"reason": "user_not_authenticated", "command": "%s"}`, req.Command))
+		return
+	}
+
+	isAuthorized := false
+	for _, rule := range permissions.Permissions {
+		if rule.Node == "*" || rule.Node == nodeID {
+			// This is a simple example. Real-world would check command permissions.
+			isAuthorized = true
+			break
+		}
+	}
+
+	if !isAuthorized {
+		http.Error(w, fmt.Sprintf("User '%s' is not authorized to run commands on node '%s'.", username, nodeID), http.StatusForbidden)
+		log.Printf("Proxy: User '%s' not authorized to run commands on node '%s'.", username, nodeID)
+		auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "run_command_denied", fmt.Sprintf(`{"reason": "not_authorized", "node_id": "%s", "command": "%s"}`, nodeID, req.Command))
+		return
+	}
+
 
 	log.Printf("Proxy: Forwarding command '%s %v' to agent %s (%s)", req.Command, req.Args, agent.ID, agent.IPAddress)
 
@@ -1142,6 +1213,7 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Failed to forward command to agent", http.StatusBadGateway)
 		log.Printf("Proxy: Error forwarding command to agent %s (%s): %v", agent.ID, agent.IPAddress, err)
+		auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "run_command_failed", fmt.Sprintf(`{"reason": "forwarding_error", "node_id": "%s", "command": "%s"}`, nodeID, req.Command))
 		return
 	}
 	defer resp.Body.Close()
@@ -1150,6 +1222,7 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		log.Printf("Proxy: Agent %s returned non-OK status %d: %s", agent.ID, resp.StatusCode, string(bodyBytes))
 		http.Error(w, fmt.Sprintf("Agent returned error: %s", string(bodyBytes)), resp.StatusCode)
+		auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "run_command_failed", fmt.Sprintf(`{"reason": "agent_error", "node_id": "%s", "command": "%s"}`, nodeID, req.Command))
 		return
 	}
 
@@ -1158,6 +1231,9 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("Proxy: Failed to copy agent response to client: %v", err)
 	}
+
+	// Log a successful run-command action
+	auditLog("allsafe-proxy", username, "MEDIUM_AUDIT", "run_command_successful", fmt.Sprintf(`{"node_id": "%s", "command": "%s"}`, nodeID, req.Command))
 }
 
 func handleTerminateSession(w http.ResponseWriter, r *http.Request) {
@@ -1168,9 +1244,11 @@ func handleTerminateSession(w http.ResponseWriter, r *http.Request) {
 	
 	if r.Header.Get("X-Admin-Token") != proxyCfg.AdminToken {
 		http.Error(w, "Unauthorized: Invalid admin token", http.StatusUnauthorized)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "session_terminate_denied", `{"reason": "unauthorized_admin"}`)
 		return
 	}
 
+	adminUsername := "allsafe-admin" // A placeholder username for the admin token.
 
 	var req struct {
 		Username string `json:"username"`
@@ -1178,6 +1256,7 @@ func handleTerminateSession(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		log.Printf("Proxy: Failed to decode terminate session request: %v", err)
+		auditLog("allsafe-proxy", adminUsername, "ADMIN_ACTION", "session_terminate_failed", `{"reason": "invalid_request_body"}`)
 		return
 	}
 
@@ -1201,6 +1280,7 @@ func handleTerminateSession(w http.ResponseWriter, r *http.Request) {
 
 	if len(terminatedSessions) == 0 {
 		http.Error(w, fmt.Sprintf("No active sessions found for user '%s'.", req.Username), http.StatusNotFound)
+		auditLog("allsafe-proxy", adminUsername, "ADMIN_ACTION", "session_terminate_failed", fmt.Sprintf(`{"reason": "no_sessions_found", "target_username": "%s"}`, req.Username))
 		return
 	}
 
@@ -1226,7 +1306,7 @@ func handleTerminateSession(w http.ResponseWriter, r *http.Request) {
 
 	// Log the termination action
 	for _, session := range terminatedSessions {
-		auditLog("allsafe-proxy", "allsafe-admin", "session_terminate", "session_terminate", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, session.NodeID, session.LoginUser))
+		auditLog("allsafe-proxy", adminUsername, "ADMIN_ACTION", "session_terminate", fmt.Sprintf(`{"target_username": "%s", "node_id": "%s", "remote_login": "%s"}`, session.UserID, session.NodeID, session.LoginUser))
 	}
 }
 
@@ -1266,8 +1346,11 @@ func terminateAgentSession(agent AgentInfo, userID, loginUser string) {
 func handleListSessions(w http.ResponseWriter, r *http.Request) {
     if r.Header.Get("X-Admin-Token") != proxyCfg.AdminToken {
 		http.Error(w, "Unauthorized: Invalid admin token", http.StatusUnauthorized)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "list_sessions_denied", `{"reason": "unauthorized_admin"}`)
 		return
 	}
+	
+	adminUsername := "allsafe-admin"
 
     sessionsMutex.RLock()
     defer sessionsMutex.RUnlock()
@@ -1288,14 +1371,20 @@ func handleListSessions(w http.ResponseWriter, r *http.Request) {
     if err := json.NewEncoder(w).Encode(sessionsList); err != nil {
         log.Printf("Proxy: Failed to encode active sessions list: %v", err)
         http.Error(w, "Internal server error", http.StatusInternalServerError)
+		auditLog("allsafe-proxy", adminUsername, "ADMIN_ACTION", "list_sessions_failed", fmt.Sprintf(`{"reason": "encode_error", "error": "%v"}`, err))
     }
+	
+	auditLog("allsafe-proxy", adminUsername, "ADMIN_ACTION", "list_sessions_successful", "{}")
 }
 
 func handleAuthenticatedUsers(w http.ResponseWriter, r *http.Request) {
     if r.Header.Get("X-Admin-Token") != proxyCfg.AdminToken {
         http.Error(w, "Unauthorized: Invalid admin token", http.StatusUnauthorized)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "list_authenticated_users_denied", `{"reason": "unauthorized_admin"}`)
         return
     }
+
+	adminUsername := "allsafe-admin"
 
     authMutex.RLock()
     defer authMutex.RUnlock()
@@ -1309,7 +1398,10 @@ func handleAuthenticatedUsers(w http.ResponseWriter, r *http.Request) {
     if err := json.NewEncoder(w).Encode(authenticatedUsernames); err != nil {
         log.Printf("Proxy: Failed to encode authenticated users list: %v", err)
         http.Error(w, "Internal server error", http.StatusInternalServerError)
+		auditLog("allsafe-proxy", adminUsername, "ADMIN_ACTION", "list_authenticated_users_failed", fmt.Sprintf(`{"reason": "encode_error", "error": "%v"}`, err))
     }
+	
+	auditLog("allsafe-proxy", adminUsername, "ADMIN_ACTION", "list_authenticated_users_successful", "{}")
 }
 
 func cleanupOldAgents() {
