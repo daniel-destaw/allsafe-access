@@ -127,18 +127,19 @@ func initConfig(appName string) {
 
 // Constants for API endpoints
 const (
-	registerEndpoint           = "/register"
-	heartbeatEndpoint          = "/heartbeat"
-	runCommandEndpoint         = "/run-command"
-	cliShellEndpoint           = "/cli/shell"
-	interactiveSessionEndpoint = "/agent/interactive"
-	authEndpoint               = "/cli/auth"
-	listNodesEndpoint          = "/cli/nodes"
-	inviteEndpoint             = "/invite"
-	setPasswordEndpoint        = "/set-password"
-	terminateSessionEndpoint   = "/admin/terminate-session"
-	listSessionsEndpoint       = "/admin/sessions"
+	registerEndpoint             = "/register"
+	heartbeatEndpoint            = "/heartbeat"
+	runCommandEndpoint           = "/run-command"
+	cliShellEndpoint             = "/cli/shell"
+	interactiveSessionEndpoint   = "/agent/interactive"
+	authEndpoint                 = "/cli/auth"
+	listNodesEndpoint            = "/cli/nodes"
+	inviteEndpoint               = "/invite"
+	setPasswordEndpoint          = "/set-password"
+	terminateSessionEndpoint     = "/admin/terminate-session"
+	listSessionsEndpoint         = "/admin/sessions"
 	listAuthenticatedUsersEndpoint = "/admin/authenticated-users"
+	auditEndpoint                = "/audit/agent"
 )
 
 type AgentInfo struct {
@@ -303,6 +304,9 @@ func runProxy(cmd *cobra.Command, args []string) {
 	mux.HandleFunc(terminateSessionEndpoint, handleTerminateSession)
 	mux.HandleFunc(listSessionsEndpoint, handleListSessions)
 	mux.HandleFunc(listAuthenticatedUsersEndpoint, handleAuthenticatedUsers)
+	
+	// NEW: Endpoint for agents to send maximum audit events.
+	mux.HandleFunc(auditEndpoint, handleAuditEvents)
 
 	fs := http.FileServer(http.Dir("cmd/allsafe-proxy/templates"))
 	mux.Handle("/static/", http.StripPrefix("/static/", fs))
@@ -330,13 +334,38 @@ func runProxy(cmd *cobra.Command, args []string) {
 	server.Shutdown(context.Background())
 }
 
-// auditLog writes an entry to the audit_logs table.
-func auditLog(action, actorUsername, targetUsername, details string) {
-	auditLogSQL := `INSERT INTO audit_logs (action, actor_username, target_username, details) VALUES (?, ?, ?, ?)`
-	_, err := database.Exec(auditLogSQL, action, actorUsername, targetUsername, details)
+// auditLog writes an entry to the audit_events table.
+func auditLog(componentID, userID, eventType, action, details string) {
+	// The timestamp is generated automatically by the database.
+	auditLogSQL := `INSERT INTO audit_events (timestamp, component_id, user_id, event_type, action, details) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)`
+	_, err := database.Exec(auditLogSQL, componentID, userID, eventType, action, details)
 	if err != nil {
 		log.Printf("Warning: Failed to write to audit logs: %v", err)
 	}
+}
+
+// handleAuditEvents receives audit events from the agent and logs them to the database.
+func handleAuditEvents(w http.ResponseWriter, r *http.Request) {
+	var event struct {
+		ComponentID string `json:"component_id"`
+		UserID      string `json:"user_id"`
+		EventType   string `json:"event_type"`
+		Action      string `json:"action"`
+		Details     string `json:"details"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		log.Printf("Proxy: Failed to decode audit event request: %v", err)
+		return
+	}
+
+	log.Printf("Proxy: Received maximum audit event from agent '%s' for user '%s'. Action: '%s'", event.ComponentID, event.UserID, event.Action)
+
+	// Insert the audit event into the database.
+	auditLog(event.ComponentID, event.UserID, event.EventType, event.Action, event.Details)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "audit_event_logged"})
 }
 
 func handleInvite(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +542,7 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log the password set action to the audit logs.
-	auditLog("password_set", payload.Username, payload.Username, "{}")
+	auditLog("allsafe-proxy", payload.Username, "password_set", "password_set", "{}")
 
 	fmt.Fprintf(w, `
 		<!DOCTYPE html>
@@ -713,7 +742,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
 		log.Printf("Proxy: Authentication failed for user '%s': %v", req.Username, err)
-		auditLog("auth_failure", req.Username, req.Username, fmt.Sprintf(`{"reason": "%v"}`, err))
+		auditLog("allsafe-proxy", req.Username, "auth_failure", "authentication_failure", fmt.Sprintf(`{"reason": "%v"}`, err))
 		return
 	}
 
@@ -728,13 +757,13 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		if req.TotpCode == "" {
 			http.Error(w, "MFA required", http.StatusForbidden)
 			log.Printf("Proxy: Authentication failed for user '%s' - MFA required but not provided.", req.Username)
-			auditLog("auth_failure", req.Username, req.Username, `{"reason": "MFA required but not provided"}`)
+			auditLog("allsafe-proxy", req.Username, "auth_failure", "authentication_failure", `{"reason": "MFA required but not provided"}`)
 			return
 		}
 		if !mfa.ValidateTOTP(req.TotpCode, mfaSecret) {
 			http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
 			log.Printf("Proxy: Authentication failed for user '%s' - invalid TOTP code.", req.Username)
-			auditLog("auth_failure", req.Username, req.Username, `{"reason": "Invalid TOTP code"}`)
+			auditLog("allsafe-proxy", req.Username, "auth_failure", "authentication_failure", `{"reason": "Invalid TOTP code"}`)
 			return
 		}
 	}
@@ -744,7 +773,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	authMutex.Unlock()
 
 	// Log successful authentication.
-	auditLog("auth_success", req.Username, req.Username, "{}")
+	auditLog("allsafe-proxy", req.Username, "auth_success", "authentication_success", "{}")
 
 	response := map[string]string{
 		"message": "Authentication successful",
@@ -853,7 +882,7 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 	if !isAuthorized {
 		http.Error(w, fmt.Sprintf("User '%s' is not authorized to access node '%s' as user '%s'.", userID, nodeID, loginUser), http.StatusForbidden)
 		log.Printf("Proxy: User '%s' is not authorized to access node '%s' as '%s' based on their role.", userID, nodeID, loginUser)
-		auditLog("interactive_session_denied", userID, nodeID, fmt.Sprintf(`{"remote_login": "%s", "reason": "unauthorized"}`, loginUser))
+		auditLog("allsafe-proxy", userID, "interactive_session_denied", "interactive_session_denied", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s", "reason": "unauthorized"}`, nodeID, loginUser))
 		return
 	}
 
@@ -886,8 +915,12 @@ func handleCLIInteractiveRequest(w http.ResponseWriter, r *http.Request) {
 		sessionsMutex.Lock()
 		delete(activeSessions, sessionID)
 		sessionsMutex.Unlock()
-		auditLog("interactive_session_end", userID, nodeID, fmt.Sprintf(`{"remote_login": "%s"}`, loginUser))
+		auditLog("allsafe-proxy", userID, "interactive_session_end", "interactive_session_end", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, nodeID, loginUser))
 	}()
+	
+	// NEW: Log the start of a new interactive session as a medium audit event.
+	auditLog("allsafe-proxy", userID, "interactive_session_start", "interactive_session_start", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, nodeID, loginUser))
+
 
 	agentWsURL := fmt.Sprintf("wss://%s:%d%s?user_id=%s&login_user=%s",
 		agent.IPAddress,
@@ -1193,7 +1226,7 @@ func handleTerminateSession(w http.ResponseWriter, r *http.Request) {
 
 	// Log the termination action
 	for _, session := range terminatedSessions {
-		auditLog("session_terminate", "allsafe-admin", session.UserID, fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, session.NodeID, session.LoginUser))
+		auditLog("allsafe-proxy", "allsafe-admin", "session_terminate", "session_terminate", fmt.Sprintf(`{"node_id": "%s", "remote_login": "%s"}`, session.NodeID, session.LoginUser))
 	}
 }
 
