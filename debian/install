@@ -1,5 +1,0 @@
-bin/allsafe-admin usr/bin/
-bin/allsafe-agent usr/bin/
-bin/allsafe-auth usr/bin/
-bin/allsafe-cli usr/bin/
-bin/allsafe-proxy usr/bin/

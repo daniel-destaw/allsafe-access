@@ -1,0 +1,18 @@
+
+bin/allsafe-proxy usr/bin/
+bin/allsafe-cli usr/bin/
+bin/allsafe-agent usr/bin/
+bin/allsafe-admin usr/bin/
+bin/allsafe-auth usr/bin/
+cmd/allsafe-proxy/templates/* usr/share/allsafe-proxy/templates/
+configs/configs/allsafe-proxy.yaml etc/allsafe-proxy/
+configs/certs/proxy.crt etc/allsafe-proxy/certs/
+configs/certs/proxy.key etc/allsafe-proxy/certs/
+configs/certs/proxy_ca.crt etc/allsafe-proxy/certs/
+configs/configs/allsafe-agent.yaml etc/allsafe-agent/
+configs/certs/agent.crt etc/allsafe-agent/certs/
+configs/certs/agent.key etc/allsafe-agent/certs/
+configs/certs/agent_ca.crt etc/allsafe-agent/certs/
+configs/configs/allsafe-cli.yaml etc/allsafe-cli/
+configs/db/allsafe_admin.db etc/allsafe-proxy/
+configs/roles/*.yaml etc/allsafe-access/role/

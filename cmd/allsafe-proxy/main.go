@@ -184,7 +184,7 @@ func init() {
 	cobra.OnInitialize(func() {
 		initConfig("allsafe-proxy")
 		var err error
-		inviteTemplate, err = template.ParseFiles("cmd/allsafe-proxy/templates/invite_form.html")
+		inviteTemplate, err = template.ParseFiles("/usr/share/allsafe-proxy/templates/invite_form.html")
 		if err != nil {
 			log.Fatalf("Failed to parse invitation template: %v", err)
 		}
@@ -224,8 +224,8 @@ func init() {
 	viper.SetDefault("agent_heartbeat_timeout_minutes", 5)
 	viper.SetDefault("registration_token", "")
 	viper.SetDefault("require_client_cert_for_cli", false)
-	viper.SetDefault("users_config_path", "./allsafe_admin.db")
-	viper.SetDefault("roles_config_dir", "./configs/roles")
+	viper.SetDefault("users_config_path", "/etc/allsafe-proxy/allsafe_admin.db")
+	viper.SetDefault("roles_config_dir", "/etc/allsafe-access/role/")
 	viper.SetDefault("invite_url_base", "https://localhost:8080")
     // REMOVED viper.SetDefault for admin_token
 }

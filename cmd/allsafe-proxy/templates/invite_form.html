@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Set Your Password</title>
-    <link rel="stylesheet" href="/static/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/static/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/static/styles/css2.css">
     <style>
         :root {
             --primary: #2563eb;
@@ -285,7 +285,7 @@
     <div class="card">
         <div class="form-section">
             <div class="header">
-                <img src="/static/logo/logo.png" alt="Allsafe-Access Logo" class="logo">
+                <img src="/usr/share/allsafe-proxy/templates/static/logo/logo.png" alt="Allsafe-Access Logo" class="logo">
                 <h1 class="title">Set Your Password</h1>
                 <p class="subtitle">Create a new password for <span class="username">{{.Username}}</span>.</p>
             </div>
@@ -365,7 +365,7 @@
         {{end}}
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
+    <script src="/usr/share/allsafe-proxy/templates/static/styles/qrious.min.js"></script>
     <script>
         const passwordPolicyDetails = {
             "none": { minLength: 0 },
