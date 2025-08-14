@@ -1,0 +1,5 @@
+./bin/allsafe-admin
+./bin/allsafe-agent
+./bin/allsafe-auth
+./bin/allsafe-cli
+./bin/allsafe-proxy

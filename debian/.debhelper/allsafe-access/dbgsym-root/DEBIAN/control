@@ -1,0 +1,13 @@
+Package: allsafe-access-dbgsym
+Package-Type: ddeb
+Source: allsafe-access
+Version: 1.0.0
+Auto-Built-Package: debug-symbols
+Architecture: amd64
+Maintainer: Daniel Destaw www.allsafex.com
+Installed-Size: 23695
+Depends: allsafe-access (= 1.0.0)
+Section: debug
+Priority: optional
+Description: debug symbols for allsafe-access
+Build-Ids: 2061d9dfdfdec8ceac42c9eef20a7547ef6b8087 43a99aacb68c6eb9a20130ee5d076ed744aebe5f 5edf3e627d14d87b79d97c61a2da17031862d389 6233bd6f72fe5215c4171e58e7dc7528f71442a5 7cf94b0cf91263cded4a2d3561ef6519c71d4652

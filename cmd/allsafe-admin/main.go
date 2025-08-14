@@ -16,13 +16,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"allsafe-access/pkg/mfa"
-	"github.com/spf13/cobra"
 	_ "github.com/mattn/go-sqlite3"
-	"gopkg.in/yaml.v2"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // dbPath is the hardcoded path to the SQLite database file.
@@ -37,17 +38,17 @@ var passwordPolicy string
 // mfaType will hold the value of the --mfa flag for user creation.
 var mfaType string
 
-// New flag to hold the proxy's URL
+// proxyURL holds the proxy's URL from the configuration or flag.
 var proxyURL string
 
 // caCertPath will hold the path to the CA certificate file.
 var caCertPath string
 
-// secretKey is used for signing the invitation token.
-var secretKey = []byte("a-very-long-and-secure-secret-key-for-signing-tokens")
+// secretKey is used for signing the invitation token. This is no longer hardcoded.
+var secretKey []byte
 
-// adminToken is a simple, hardcoded token for the admin CLI to authenticate with the proxy's admin endpoints.
-const adminToken = "a-very-secret-admin-token-for-proxy-communication"
+// adminToken is a simple token for the admin CLI. This is no longer hardcoded.
+var adminToken string
 
 // tokenPayload is the structure for the invitation token payload.
 type tokenPayload struct {
@@ -139,20 +140,17 @@ var userAddCmd = &cobra.Command{
 			}
 		}
 
-		// Generate a new, unique nonce for the token.
 		nonceBytes := make([]byte, 16)
 		if _, err := rand.Read(nonceBytes); err != nil {
 			log.Fatalf("Failed to generate nonce: %v", err)
 		}
 		nonce := base64.URLEncoding.EncodeToString(nonceBytes)
 
-		// Create a signed token that includes the policy and MFA secret.
 		token, err := createSignedToken(username, passwordPolicy, mfaSecret, nonce)
 		if err != nil {
 			log.Fatalf("Failed to create signed token: %v", err)
 		}
 
-		// Insert user without the mfa_enabled column, since it does not exist in your schema.
 		insertUserSQL := `INSERT INTO users (username, role, invite_token) VALUES (?, ?, ?)`
 		_, err = tx.Exec(insertUserSQL, username, role, token)
 		if err != nil {
@@ -163,17 +161,13 @@ var userAddCmd = &cobra.Command{
 		}
 
 		if mfaType == "totp" {
-			insertMfaSQL := `INSERT INTO mfa_devices (user_id, mfa_type_id, config, is_enabled) 
+			insertMfaSQL := `INSERT INTO mfa_devices (user_id, mfa_type_id, config, is_enabled)
                             VALUES ((SELECT id FROM users WHERE username = ?), (SELECT id FROM mfa_types WHERE type_name = ?), ?, ?)`
 			_, err = tx.Exec(insertMfaSQL, username, mfaType, mfaSecret, 0)
 			if err != nil {
 				log.Fatalf("Failed to insert MFA device: %v", err)
 			}
 		}
-
-		// Note: userAddCmd directly modifies the 'users' table, and the proxy's handleInvite
-		// will log the ADMIN_ACTION 'user_invite' when the invitation link is accessed.
-		// No direct audit_logs insertion here since the proxy handles the comprehensive logging for invite.
 
 		err = tx.Commit()
 		if err != nil {
@@ -182,7 +176,7 @@ var userAddCmd = &cobra.Command{
 
 		inviteURL := fmt.Sprintf("%s/invite?token=%s", proxyURL, token)
 
-		fmt.Printf("User '%s' added successfully with role '%s', password policy '%s', and MFA '%s'!\n", username, role, passwordPolicy, mfaType)
+		fmt.Printf("User '%s' added successfully with role '%s', policy '%s', and MFA '%s'!\n", username, role, passwordPolicy, mfaType)
 		fmt.Printf("Invitation URL: %s\n", inviteURL)
 	},
 }
@@ -196,7 +190,6 @@ var userDeleteCmd = &cobra.Command{
 		username := args[0]
 		log.Printf("Attempting to delete user: %s\n", username)
 
-		// Confirmation prompt
 		fmt.Printf("Are you sure you want to delete user '%s'? This action cannot be undone. (yes/no): ", username)
 		reader := bufio.NewReader(os.Stdin)
 		response, _ := reader.ReadString('\n')
@@ -217,7 +210,6 @@ var userDeleteCmd = &cobra.Command{
 		}
 		defer tx.Rollback()
 
-		// Delete the user from the 'users' table.
 		deleteSQL := `DELETE FROM users WHERE username = ?`
 		result, err := tx.Exec(deleteSQL, username)
 		if err != nil {
@@ -228,10 +220,6 @@ var userDeleteCmd = &cobra.Command{
 		if rowsAffected == 0 {
 			log.Fatalf("Error: User '%s' not found.", username)
 		}
-
-		// No direct audit_logs insertion here, as the proxy handles logging admin actions
-		// (e.g., if you introduce an admin API to delete users via the proxy).
-		// For CLI-only actions, you might consider direct logging if they don't go through the proxy.
 
 		err = tx.Commit()
 		if err != nil {
@@ -263,7 +251,6 @@ var userResetPasswordCmd = &cobra.Command{
 		}
 		defer tx.Rollback()
 
-		// Check if the user exists first.
 		var exists bool
 		querySQL := `SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)`
 		err = tx.QueryRow(querySQL, username).Scan(&exists)
@@ -271,27 +258,22 @@ var userResetPasswordCmd = &cobra.Command{
 			log.Fatalf("Error: User '%s' not found.", username)
 		}
 
-		// Generate a new, unique nonce for the token.
 		nonceBytes := make([]byte, 16)
 		if _, err := rand.Read(nonceBytes); err != nil {
 			log.Fatalf("Failed to generate nonce: %v", err)
 		}
 		nonce := base64.URLEncoding.EncodeToString(nonceBytes)
 
-		// Create a new signed token without MFA secret for password reset.
 		token, err := createSignedToken(username, "none", "", nonce)
 		if err != nil {
 			log.Fatalf("Failed to create signed token: %v", err)
 		}
 
-		// Update the user's record with the new token and null password hash.
 		updateSQL := `UPDATE users SET password_hash = NULL, invite_token = ? WHERE username = ?`
 		_, err = tx.Exec(updateSQL, token, username)
 		if err != nil {
 			log.Fatalf("Failed to reset password for user: %v", err)
 		}
-
-		// No direct audit_logs insertion here; the proxy's `handleSetPassword` will log this when the user sets their password.
 
 		err = tx.Commit()
 		if err != nil {
@@ -318,7 +300,6 @@ var userListCmd = &cobra.Command{
 		}
 		defer db.Close()
 
-		// Querying without the mfa_enabled column.
 		rows, err := db.Query(`SELECT id, username, role FROM users`)
 		if err != nil {
 			log.Fatalf("Failed to query users: %v", err)
@@ -361,9 +342,8 @@ var userGetCmd = &cobra.Command{
 		var id int
 		var passwordHash, inviteToken sql.NullString
 		var role, createdAt string
-		var mfaEnabled sql.NullBool // Using NullBool to handle potential absence of the column
+		var mfaEnabled sql.NullBool
 
-		// Query for mfa status separately from the users table.
 		querySQL := `SELECT id, role, password_hash, invite_token, created_at FROM users WHERE username = ?`
 		err = db.QueryRow(querySQL, username).Scan(&id, &role, &passwordHash, &inviteToken, &createdAt)
 		if err != nil {
@@ -373,7 +353,6 @@ var userGetCmd = &cobra.Command{
 			log.Fatalf("Failed to get user details: %v", err)
 		}
 
-		// Check if MFA is enabled by querying the mfa_devices table
 		mfaEnabled = sql.NullBool{Bool: false, Valid: true}
 		var mfaTypeCount int
 		mfaQuerySQL := `SELECT COUNT(*) FROM mfa_devices WHERE user_id = ? AND is_enabled = 1`
@@ -409,7 +388,6 @@ var userGetCmd = &cobra.Command{
 // createHTTPClientWithCA configures an HTTP client to trust a specific CA certificate.
 func createHTTPClientWithCA() *http.Client {
 	if caCertPath == "" {
-		// Fallback to default behavior if no CA cert is specified.
 		return &http.Client{}
 	}
 
@@ -443,8 +421,8 @@ var terminateCmd = &cobra.Command{
 		username := args[0]
 		log.Printf("Attempting to terminate sessions for user: %s\n", username)
 
-		if proxyURL == "" {
-			log.Fatal("Error: Proxy URL is not set. Use the --proxy-url flag or set it in the config.")
+		if proxyURL == "" || adminToken == "" {
+			log.Fatal("Error: Proxy URL or Admin Token is not set. Please ensure `allsafe-proxy.yaml` is configured and available.")
 		}
 
 		terminateURL := fmt.Sprintf("%s/admin/terminate-session", proxyURL)
@@ -469,7 +447,6 @@ var terminateCmd = &cobra.Command{
 
 		bodyBytes, _ := ioutil.ReadAll(resp.Body)
 
-		// Handle the case where no active sessions are found gracefully
 		if resp.StatusCode == http.StatusBadRequest {
 			responseBody := string(bodyBytes)
 			if strings.Contains(responseBody, "No active sessions found for user") {
@@ -498,8 +475,8 @@ var listActiveSessionsCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		log.Println("Attempting to list active sessions...")
 
-		if proxyURL == "" {
-			log.Fatal("Error: Proxy URL is not set. Use the --proxy-url flag or set it in the config.")
+		if proxyURL == "" || adminToken == "" {
+			log.Fatal("Error: Proxy URL or Admin Token is not set. Please ensure `allsafe-proxy.yaml` is configured and available.")
 		}
 
 		listURL := fmt.Sprintf("%s/admin/sessions", proxyURL)
@@ -554,8 +531,8 @@ var listAuthenticatedUsersCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		log.Println("Attempting to list authenticated users...")
 
-		if proxyURL == "" {
-			log.Fatal("Error: Proxy URL is not set. Use the --proxy-url flag or set it in the config.")
+		if proxyURL == "" || adminToken == "" {
+			log.Fatal("Error: Proxy URL or Admin Token is not set. Please ensure `allsafe-proxy.yaml` is configured and available.")
 		}
 
 		listURL := fmt.Sprintf("%s/admin/authenticated-users", proxyURL)
@@ -632,7 +609,6 @@ var listAuditLogsCmd = &cobra.Command{
 			queryArgs = append(queryArgs, auditUserID)
 		}
 		if auditSearch != "" {
-			// Search for a substring in either action or details
 			whereClauses = append(whereClauses, "(action LIKE ? OR details LIKE ?)")
 			searchTerm := fmt.Sprintf("%%%s%%", auditSearch)
 			queryArgs = append(queryArgs, searchTerm, searchTerm)
@@ -645,14 +621,13 @@ var listAuditLogsCmd = &cobra.Command{
 
 		queryBuilder.WriteString(" ORDER BY timestamp DESC")
 
-		// Add limit
 		if auditLimit > 0 {
 			queryBuilder.WriteString(" LIMIT ?")
 			queryArgs = append(queryArgs, auditLimit)
 		}
-		
+
 		query := queryBuilder.String()
-		
+
 		rows, err := db.Query(query, queryArgs...)
 		if err != nil {
 			log.Fatalf("Failed to query audit logs: %v", err)
@@ -662,7 +637,6 @@ var listAuditLogsCmd = &cobra.Command{
 		var auditEvents []AuditEvent
 		for rows.Next() {
 			var event AuditEvent
-			// Using sql.NullString to handle potential NULL values in user_id or details
 			var userID, details sql.NullString
 			if err := rows.Scan(&event.Timestamp, &event.ComponentID, &userID, &event.EventType, &event.Action, &details); err != nil {
 				log.Fatalf("Failed to scan row: %v", err)
@@ -671,7 +645,7 @@ var listAuditLogsCmd = &cobra.Command{
 			event.Details = details.String
 			auditEvents = append(auditEvents, event)
 		}
-		
+
 		if err := rows.Err(); err != nil {
 			log.Fatalf("Error during rows iteration: %v", err)
 		}
@@ -680,7 +654,7 @@ var listAuditLogsCmd = &cobra.Command{
 			fmt.Println("No audit logs found matching the criteria.")
 			return
 		}
-		
+
 		fmt.Println("Audit Logs:")
 		fmt.Println("---------------------------------------------------------------------------------------------------------------------------")
 		fmt.Printf("%-20s | %-15s | %-15s | %-18s | %-15s | %s\n", "TIMESTAMP", "COMPONENT", "USER", "EVENT TYPE", "ACTION", "DETAILS")
@@ -699,6 +673,10 @@ var listAuditLogsCmd = &cobra.Command{
 
 // createSignedToken generates a base64-encoded, HMAC-signed token.
 func createSignedToken(username, policy, mfaSecret, nonce string) (string, error) {
+	if len(secretKey) == 0 {
+		return "", fmt.Errorf("secretKey is not set. Cannot create a signed token.")
+	}
+
 	payload := tokenPayload{
 		Username:       username,
 		PasswordPolicy: policy,
@@ -729,7 +707,6 @@ func createDatabaseSchema() {
 	}
 	defer db.Close()
 
-	// The users table definition now matches your existing schema.
 	usersTableSQL := `
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -739,8 +716,6 @@ func createDatabaseSchema() {
         invite_token TEXT UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );`
-
-	// REMOVED audit_logs table creation
 
 	mfaTypesTableSQL := `
     CREATE TABLE IF NOT EXISTS mfa_types (
@@ -805,7 +780,6 @@ func createDatabaseSchema() {
 		log.Fatalf("Failed to create 'audit_events' table: %v", err)
 	}
 
-	// Insert default MFA types if they don't exist
 	insertMfaTypesSQL := `INSERT OR IGNORE INTO mfa_types (type_name) VALUES ('totp'), ('hotp');`
 	_, err = db.Exec(insertMfaTypesSQL)
 	if err != nil {
@@ -814,36 +788,58 @@ func createDatabaseSchema() {
 }
 
 func init() {
-	// Read the allsafe-proxy.yaml file to get the listen_address
-	yamlFile, err := ioutil.ReadFile("../../allsafe-proxy.yaml")
-	if err != nil {
-		// Log a warning and use the default value if the file can't be read
-		log.Printf("Warning: Failed to read allsafe-proxy.yaml. Using default proxy URL. Error: %v", err)
-		proxyURL = "https://10.195.130.14:8080"
-	} else {
-		var config struct {
-			ListenAddress string `yaml:"listen_address"`
-		}
-		err = yaml.Unmarshal(yamlFile, &config)
-		if err != nil {
-			log.Printf("Warning: Failed to unmarshal allsafe-proxy.yaml. Using default proxy URL. Error: %v", err)
-			proxyURL = "https://10.195.130.14:8080"
+	var cfgFile string
+	// Set up Viper to read configuration
+	cobra.OnInitialize(func() {
+		if cfgFile != "" {
+			viper.SetConfigFile(cfgFile)
 		} else {
-			// Split the listen_address to get just the host and port
-			parts := strings.Split(config.ListenAddress, ":")
-			if len(parts) == 2 {
-				proxyURL = fmt.Sprintf("https://%s:%s", parts[0], parts[1])
-			} else {
-				// Handle cases where the address is just a hostname or invalid
-				proxyURL = fmt.Sprintf("https://%s", config.ListenAddress)
-			}
-			log.Printf("Successfully loaded proxy URL from config: %s", proxyURL)
+			viper.AddConfigPath(".")
+			viper.AddConfigPath(filepath.Join(".."))
+			viper.AddConfigPath(filepath.Join("/etc", "allsafe-proxy"))
+			viper.SetConfigName("allsafe-proxy")
 		}
-	}
+		viper.SetConfigType("yaml")
+		viper.AutomaticEnv()
+		viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+
+		if err := viper.ReadInConfig(); err == nil {
+			log.Printf("Using config file: %s", viper.ConfigFileUsed())
+		} else {
+			if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+				log.Fatalf("Fatal: No config file found. 'allsafe-proxy.yaml' must be configured for the admin CLI to function.")
+			} else {
+				log.Fatalf("Fatal: Error reading config file: %v", err)
+			}
+		}
+
+		// Read the secrets and other configuration values from Viper
+		secretKey = []byte(viper.GetString("secret_key"))
+		adminToken = viper.GetString("admin_token")
+		listenAddress := viper.GetString("listen_address")
+		caCertPath = viper.GetString("ca_cert_file")
+
+		// Validate that the required secrets are set
+		if len(secretKey) == 0 {
+			log.Fatal("Fatal: 'secret_key' is not set in the configuration.")
+		}
+		if len(adminToken) == 0 {
+			log.Fatal("Fatal: 'admin_token' is not set in the configuration.")
+		}
+
+		// Construct the proxyURL
+		parts := strings.Split(listenAddress, ":")
+		if len(parts) == 2 {
+			proxyURL = fmt.Sprintf("https://%s:%s", parts[0], parts[1])
+		} else {
+			proxyURL = fmt.Sprintf("https://%s", listenAddress)
+		}
+		log.Printf("Proxy URL for admin CLI is set to: %s", proxyURL)
+	})
 
 	rootCmd.AddCommand(userCmd)
 	rootCmd.AddCommand(sessionsCmd)
-	rootCmd.AddCommand(auditCmd) // Add the new audit command
+	rootCmd.AddCommand(auditCmd)
 
 	userCmd.AddCommand(userAddCmd)
 	userCmd.AddCommand(userDeleteCmd)
@@ -855,21 +851,18 @@ func init() {
 	sessionsCmd.AddCommand(listActiveSessionsCmd)
 	sessionsCmd.AddCommand(listAuthenticatedUsersCmd)
 
-	auditCmd.AddCommand(listAuditLogsCmd) // Add the list sub-command to audit
+	auditCmd.AddCommand(listAuditLogsCmd)
 
 	userAddCmd.Flags().StringVar(&role, "role", "user", "The role of the new user")
 	userAddCmd.Flags().StringVar(&passwordPolicy, "policy", "none", "The password complexity policy (none, medium, hard)")
 	userAddCmd.Flags().StringVar(&mfaType, "mfa", "none", "The MFA type for the new user (totp, hotp, none)")
 
-	// New persistent flag for the proxy URL.
-	rootCmd.PersistentFlags().StringVar(&proxyURL, "proxy-url", proxyURL, "The base URL of the Allsafe Proxy server for invitation links")
-	// New persistent flag for the CA certificate path.
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./allsafe-proxy.yaml or ../allsafe-proxy.yaml)")
 	rootCmd.PersistentFlags().StringVar(&caCertPath, "cacert", "", "Path to the CA certificate file to trust for proxy connections")
-	
-	// Flags for the new audit list command
-	listAuditLogsCmd.Flags().StringVar(&auditEventType, "event-type", "", "Filter logs by event type (e.g., MEDIUM_AUDIT, ADMIN_ACTION, AUTHENTICATION, INTERACTIVE_SESSION)")
+
+	listAuditLogsCmd.Flags().StringVar(&auditEventType, "event-type", "", "Filter logs by event type (e.g., MEDIUM_AUDIT, ADMIN_ACTION)")
 	listAuditLogsCmd.Flags().StringVar(&auditUserID, "user-id", "", "Filter logs by user ID")
-	listAuditLogsCmd.Flags().StringVar(&auditSearch, "search", "", "Search logs for a keyword in the action or details fields (case-insensitive)")
+	listAuditLogsCmd.Flags().StringVar(&auditSearch, "search", "", "Search logs for a keyword in the action or details fields")
 	listAuditLogsCmd.Flags().IntVar(&auditLimit, "limit", 10, "Limit the number of results returned (default 10)")
 }
 

@@ -58,8 +58,9 @@ var authenticatedUsers = make(map[string]*auth.UserPermissions)
 var authMutex sync.RWMutex
 var database *sql.DB
 
-// Moved constants and variables from allsafe-admin
-var secretKey = []byte("a-very-long-and-secure-secret-key-for-signing-tokens")
+// REMOVED HARDCODED secretKey. It will now be read from the config file.
+var secretKey []byte
+
 var passwordPolicyDetails = map[string]struct {
 	MinLength    int
 	HasUppercase bool
@@ -226,7 +227,7 @@ func init() {
 	viper.SetDefault("users_config_path", "./allsafe_admin.db")
 	viper.SetDefault("roles_config_dir", "./configs/roles")
 	viper.SetDefault("invite_url_base", "https://localhost:8080")
-	viper.SetDefault("admin_token", "a-very-secret-admin-token-for-proxy-communication")
+    // REMOVED viper.SetDefault for admin_token
 }
 
 var rootCmd = &cobra.Command{
@@ -246,6 +247,12 @@ func main() {
 func runProxy(cmd *cobra.Command, args []string) {
 	if err := viper.Unmarshal(&proxyCfg); err != nil {
 		log.Fatalf("Unable to decode proxy config into struct: %v", err)
+	}
+    
+    // NEW: Read secret_key from configuration and validate it's set
+	secretKey = []byte(viper.GetString("secret_key"))
+	if len(secretKey) == 0 {
+		log.Fatal("Proxy: 'secret_key' not set. This is a critical security risk.")
 	}
 
 	log.Printf("Loaded Proxy Config: %+v\n", proxyCfg)
@@ -466,7 +473,7 @@ func handleSetPassword(w http.ResponseWriter, r *http.Request) {
 
 	if password != confirmPassword {
 		http.Error(w, "Passwords do not match.", http.StatusBadRequest)
-		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "set_password_failed", `{"reason": "passwords_do_not_match"}`)
+		auditLog("allsafe-proxy", "N/A", "ADMIN_ACTION", "set_password_failed", `{"reason": "passwords_do-not_match"}`)
 		return
 	}
 
