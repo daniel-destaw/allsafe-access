@@ -1,0 +1,17 @@
+kind: Role
+version: v1
+metadata:
+  name: admin
+  description: "Developer role with restricted access to specific nodes and multiple logins."
+spec:
+  options:
+    max_session_ttl: 8h
+    ssh_file_copy: true
+  permissions:
+    - node: ubuntus
+      logins:
+        - test
+        - root
+    - node: agent-002
+      logins:
+        - test2

@@ -1,0 +1,13 @@
+/etc/allsafe-access/role/admin-role.yaml
+/etc/allsafe-access/role/admin.yaml
+/etc/allsafe-access/role/dev-role.yaml
+/etc/allsafe-agent/allsafe-agent.yaml
+/etc/allsafe-agent/certs/agent.crt
+/etc/allsafe-agent/certs/agent.key
+/etc/allsafe-agent/certs/agent_ca.crt
+/etc/allsafe-cli/allsafe-cli.yaml
+/etc/allsafe-proxy/allsafe-proxy.yaml
+/etc/allsafe-proxy/allsafe_admin.db
+/etc/allsafe-proxy/certs/proxy.crt
+/etc/allsafe-proxy/certs/proxy.key
+/etc/allsafe-proxy/certs/proxy_ca.crt

@@ -1,0 +1,3 @@
+# allsafe-cli.yaml
+proxy_url: "https://ipaddress:8080" # The address of your allsafe-proxy
+

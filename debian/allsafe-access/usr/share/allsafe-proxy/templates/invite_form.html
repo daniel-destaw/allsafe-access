@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Set Your Password</title>
+    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/static/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/static/styles/css2.css">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --background: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #1e293b;
+            --text-secondary: #64748b;
+            --error: #ef4444;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --border: #e2e8f0;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --radius-lg: 0.75rem;
+            --radius-md: 0.5rem;
+            --radius-sm: 0.25rem;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--background);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            line-height: 1.5;
+        }
+
+        .card {
+            display: flex;
+            max-width: 900px;
+            width: 100%;
+            background: var(--card-bg);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .form-section {
+            padding: 2.5rem;
+            flex: 1;
+            background-color: var(--card-bg);
+            display: flex;
+            flex-direction: column;
+            gap: 1.75rem;
+        }
+        
+        .qrcode-section {
+            padding: 2.5rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-left: 1px solid var(--border);
+            width: 320px;
+            background-color: #f8fafc;
+            gap: 1.75rem;
+        }
+
+        .header {
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .logo {
+            width: 160px;
+            height: auto;
+        }
+
+        .title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .subtitle {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .username {
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .label {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-main);
+        }
+
+        .input {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            font-size: 0.875rem;
+            transition: all 0.2s ease;
+        }
+
+        .input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        .progress-container {
+            width: 100%;
+            height: 6px;
+            background: #e2e8f0;
+            border-radius: 3px;
+            margin-top: 0.25rem;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s ease, background-color 0.3s ease;
+        }
+
+        .requirements {
+            background-color: #f8fafc;
+            padding: 1.25rem;
+            border-radius: var(--radius-md);
+            box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.05);
+        }
+
+        .requirements-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-main);
+            margin-bottom: 0.75rem;
+        }
+
+        .requirements-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            list-style: none;
+        }
+
+        .requirement-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8125rem;
+        }
+
+        .requirement-icon {
+            font-size: 0.875rem;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: var(--radius-md);
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn:hover {
+            background-color: var(--primary-hover);
+        }
+
+        .btn:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.3);
+        }
+
+        .error-message {
+            color: var(--error);
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+            display: none;
+        }
+
+        .qrcode-container {
+            background: white;
+            padding: 1.25rem;
+            border-radius: var(--radius-md);
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .qrcode-image {
+            width: 180px;
+            height: 180px;
+        }
+
+        .qrcode-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .instructions {
+            text-align: center;
+            max-width: 260px;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .instructions-title {
+            font-size: 0.9375rem;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .instructions-steps {
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+            text-align: left;
+            line-height: 1.6;
+        }
+
+        @media (max-width: 768px) {
+            .card {
+                flex-direction: column;
+            }
+            
+            .form-section,
+            .qrcode-section {
+                width: 100%;
+                padding: 2rem 1.5rem;
+            }
+            
+            .qrcode-section {
+                border-left: none;
+                border-top: 1px solid var(--border);
+            }
+        }
+
+        /* Password requirement states */
+        .invalid {
+            color: var(--error);
+        }
+
+        .valid {
+            color: var(--success);
+        }
+
+        /* New rule for button spacing */
+        .form-submit-btn {
+            margin-top: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="form-section">
+            <div class="header">
+                <img src="/usr/share/allsafe-proxy/templates/static/logo/logo.png" alt="Allsafe-Access Logo" class="logo">
+                <h1 class="title">Set Your Password</h1>
+                <p class="subtitle">Create a new password for <span class="username">{{.Username}}</span>.</p>
+            </div>
+            
+            <form action="/set-password" method="post" class="space-y-6" onsubmit="return validateForm(event)">
+                <input type="hidden" name="token" value="{{.Token}}">
+                <input type="hidden" id="policy" value="{{.PasswordPolicy}}">
+                
+                <div class="form-group">
+                    <label for="password" class="label">New Password</label>
+                    <input type="password" id="password" name="password" required class="input" 
+                           oninput="updatePasswordStrength()">
+                    <div class="progress-container">
+                        <div class="progress-bar" id="password-strength-bar" style="width: 0%"></div>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="confirm_password" class="label">Confirm New Password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required class="input">
+                    <p id="match-error" class="error-message">Passwords do not match.</p>
+                </div>
+                
+                {{if ne .PasswordPolicy "none"}}
+                <div class="requirements">
+                    <h3 class="requirements-title">Password Requirements:</h3>
+                    <ul id="password-requirements" class="requirements-list">
+                        <li id="length-req" class="requirement-item invalid">
+                            <i class="requirement-icon fas fa-times-circle"></i>
+                            <span>Minimum {{if eq .PasswordPolicy "medium"}}8{{else}}12{{end}} characters</span>
+                        </li>
+                        <li id="uppercase-req" class="requirement-item invalid">
+                            <i class="requirement-icon fas fa-times-circle"></i>
+                            <span>At least one uppercase letter</span>
+                        </li>
+                        <li id="number-req" class="requirement-item invalid">
+                            <i class="requirement-icon fas fa-times-circle"></i>
+                            <span>At least one number</span>
+                        </li>
+                        {{if eq .PasswordPolicy "hard"}}
+                        <li id="special-req" class="requirement-item invalid">
+                            <i class="requirement-icon fas fa-times-circle"></i>
+                            <span>At least one special character</span>
+                        </li>
+                        {{end}}
+                    </ul>
+                </div>
+                {{end}}
+
+                <button type="submit" class="btn form-submit-btn">
+                    Set Password
+                </button>
+            </form>
+        </div>
+
+        {{if .MfaEnabled}}
+        <div class="qrcode-section">
+            <div class="qrcode-container">
+                <img id="qrcode" src="" alt="MFA QR Code" class="qrcode-image">
+                <p class="qrcode-label">Scan with your authenticator app</p>
+            </div>
+            <div class="instructions">
+                <h3 class="instructions-title">Setup Multi-Factor Authentication</h3>
+                <p class="instructions-steps">
+                    1. Open your authenticator app (Google Authenticator, Authy, etc.)<br>
+                    2. Scan the QR code or enter the setup key manually<br>
+                    3. Enter the 6-digit code below
+                </p>
+                <div class="form-group">
+                    <label for="mfa_code" class="label">Authenticator Code</label>
+                    <input type="text" id="mfa_code" name="mfa_code" required class="input" 
+                           maxlength="6" placeholder="123456">
+                    <p id="mfa-error" class="error-message">Invalid authenticator code.</p>
+                </div>
+            </div>
+        </div>
+        {{end}}
+    </div>
+
+    <script src="/usr/share/allsafe-proxy/templates/static/styles/qrious.min.js"></script>
+    <script>
+        const passwordPolicyDetails = {
+            "none": { minLength: 0 },
+            "medium": { minLength: 8, hasUppercase: true, hasNumber: true, hasSpecial: false },
+            "hard": { minLength: 12, hasUppercase: true, hasNumber: true, hasSpecial: true }
+        };
+
+        function updatePasswordStrength() {
+            const password = document.getElementById('password').value;
+            const policy = document.getElementById('policy').value;
+            const requirements = passwordPolicyDetails[policy];
+            const strengthBar = document.getElementById('password-strength-bar');
+
+            if (policy === "none") {
+                strengthBar.style.width = '100%';
+                strengthBar.style.backgroundColor = 'var(--success)';
+                return true;
+            }
+
+            let strength = 0;
+            const isLengthValid = password.length >= requirements.minLength;
+            const hasUppercase = !requirements.hasUppercase || /[A-Z]/.test(password);
+            const hasNumber = !requirements.hasNumber || /[0-9]/.test(password);
+            const hasSpecial = !requirements.hasSpecial || /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]+/.test(password);
+
+            if (password.length > 0) strength += 20;
+            if (isLengthValid) strength += 20;
+            if (hasUppercase) strength += 20;
+            if (hasNumber) strength += 20;
+            if (hasSpecial) strength += 20;
+
+            strengthBar.style.width = strength + '%';
+            
+            if (strength < 40) {
+                strengthBar.style.backgroundColor = 'var(--error)';
+            } else if (strength < 80) {
+                strengthBar.style.backgroundColor = 'var(--warning)';
+            } else {
+                strengthBar.style.backgroundColor = 'var(--success)';
+            }
+
+            updateRequirementVisuals('length-req', isLengthValid);
+            updateRequirementVisuals('uppercase-req', hasUppercase);
+            updateRequirementVisuals('number-req', hasNumber);
+            if (requirements.hasSpecial) {
+                updateRequirementVisuals('special-req', hasSpecial);
+            }
+
+            return strength === 100;
+        }
+
+        function updateRequirementVisuals(elementId, isValid) {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+
+            const icon = element.querySelector('i');
+            if (isValid) {
+                element.classList.remove('invalid');
+                element.classList.add('valid');
+                icon.classList.remove('fa-times-circle');
+                icon.classList.add('fa-check-circle');
+            } else {
+                element.classList.remove('valid');
+                element.classList.add('invalid');
+                icon.classList.remove('fa-check-circle');
+                icon.classList.add('fa-times-circle');
+            }
+        }
+        
+        function generateQRCode(url) {
+            new QRious({
+                element: document.getElementById('qrcode'),
+                value: url,
+                size: 180,
+                background: 'white',
+                foreground: '#1e293b',
+                level: 'H'
+            });
+        }
+
+        async function validateMfa(code) {
+            const token = document.querySelector('input[name="token"]').value;
+            const response = await fetch('/verify-mfa', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `token=${token}&mfa_code=${code}`
+            });
+            return response.ok;
+        }
+
+        async function validateForm(event) {
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            const matchError = document.getElementById('match-error');
+            const mfaCode = document.getElementById('mfa_code') ? document.getElementById('mfa_code').value : '';
+            const mfaError = document.getElementById('mfa-error');
+            const mfaEnabled = document.getElementById('qrcode') !== null;
+
+            // Reset error states
+            matchError.style.display = 'none';
+            if (mfaError) mfaError.style.display = 'none';
+
+            if (password !== confirmPassword) {
+                matchError.style.display = 'block';
+                event.preventDefault();
+                return false;
+            }
+
+            const policy = document.getElementById('policy').value;
+            if (policy !== "none") {
+                const isPolicyValid = updatePasswordStrength();
+                if (!isPolicyValid) {
+                    alert("Password does not meet the complexity requirements.");
+                    event.preventDefault();
+                    return false;
+                }
+            }
+
+            if (mfaEnabled) {
+                const isMfaValid = await validateMfa(mfaCode);
+                if (!isMfaValid) {
+                    mfaError.style.display = 'block';
+                    event.preventDefault();
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const mfaEnabled = document.getElementById('qrcode') !== null;
+            if (mfaEnabled) {
+                generateQRCode("{{.MfaQRCodeURL}}");
+            }
+            
+            // Initialize error messages as hidden
+            document.getElementById('match-error').style.display = 'none';
+            if (document.getElementById('mfa-error')) {
+                document.getElementById('mfa-error').style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>

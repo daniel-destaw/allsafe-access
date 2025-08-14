@@ -1,0 +1,8 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_dwz:
+	# disabled because dwz fails on compressed sections
+

@@ -1,0 +1,11 @@
+Package: allsafe-access
+Version: 1.0.0-1
+Architecture: amd64
+Maintainer: Daniel Destaw daniel@allsafex.com
+Installed-Size: 45692
+Depends: libc6 (>= 2.34)
+Section: unknown
+Priority: optional
+Homepage: <insert the upstream URL, if relevant>
+Description: <insert up to 60 chars description>
+ <insert long description, indented with spaces>

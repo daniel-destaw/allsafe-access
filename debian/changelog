@@ -1,0 +1,5 @@
+allsafe-access (1.0.0-1) UNRELEASED; urgency=medium
+
+  * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+
+ -- fs <fs@unknown>  Thu, 14 Aug 2025 16:46:22 +0300

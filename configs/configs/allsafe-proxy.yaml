@@ -1,8 +1,8 @@
 # ~/allsafe-access/allsafe-proxy.yaml
-listen_address: "10.195.130.14:8080"
-cert_file: "./configs/certs/proxy.crt"
-key_file: "./configs/certs/proxy.key"
-ca_cert_file: "./configs/certs/proxy_ca.crt"
+listen_address: "Ipaddress:8080"
+cert_file: "/etc/allsafe-proxy/certs/proxy.crt"
+key_file: "/etc/allsafe-proxy/certs/proxy.key"
+ca_cert_file: "/etc/allsafe-proxy//certs/proxy_ca.crt"
 agent_listen_port: 8081
 agent_heartbeat_timeout_minutes: 5
 

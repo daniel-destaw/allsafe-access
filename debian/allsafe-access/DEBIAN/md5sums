@@ -1,0 +1,13 @@
+3a90f43f20595d731ac88ca8ccc29695  usr/bin/allsafe-admin
+ca4c7026429da89046b4c66faae0a00e  usr/bin/allsafe-agent
+b0c3d08182eb3ea31c538bb5e858d7fe  usr/bin/allsafe-auth
+3e363f4f084207a8735a791cda0be17a  usr/bin/allsafe-cli
+a0e5893a37e81e43eb77148e4b146eb2  usr/bin/allsafe-proxy
+7e6fbeaf8cd83e4dbdf34736c2df3695  usr/share/allsafe-proxy/templates/invite_form.html
+359ad3417821afdb0f8d937ac17eb1d3  usr/share/allsafe-proxy/templates/logo/logo.png
+7a614b9a197e532c00d09a23b0996b5f  usr/share/allsafe-proxy/templates/styles/3.4.17
+c325be79a5ecca85d68eb9e5b65a547a  usr/share/allsafe-proxy/templates/styles/all.min.css
+f2a37e8dfea387fc10ae761096a5bb50  usr/share/allsafe-proxy/templates/styles/css2.css
+ea58889c516e953d6e78ca4834f834c4  usr/share/allsafe-proxy/templates/styles/qrious.min.js
+575d763280ee4016cbfaa47a11b2c68f  usr/share/doc/allsafe-access/changelog.Debian.gz
+6c938735ec02f2e2298a0b54395812e7  usr/share/doc/allsafe-access/copyright
