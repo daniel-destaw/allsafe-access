@@ -1,9 +1,9 @@
-3a90f43f20595d731ac88ca8ccc29695  usr/bin/allsafe-admin
-ca4c7026429da89046b4c66faae0a00e  usr/bin/allsafe-agent
-b0c3d08182eb3ea31c538bb5e858d7fe  usr/bin/allsafe-auth
-3e363f4f084207a8735a791cda0be17a  usr/bin/allsafe-cli
-a0e5893a37e81e43eb77148e4b146eb2  usr/bin/allsafe-proxy
-7e6fbeaf8cd83e4dbdf34736c2df3695  usr/share/allsafe-proxy/templates/invite_form.html
+54a5e702153bc9142f369c5a35eb7b92  usr/bin/allsafe-admin
+2f1ba4984c91ca7e9b3e5e306dfed9b6  usr/bin/allsafe-agent
+cb0147953eb23e938dac4abf90ebe54d  usr/bin/allsafe-auth
+6f89db2ca8cab16495591c4217295e79  usr/bin/allsafe-cli
+575263d448ac206fda8bdc50a74add07  usr/bin/allsafe-proxy
+efa3f8e13779c26625ff1b6f7e7cab87  usr/share/allsafe-proxy/templates/invite_form.html
 359ad3417821afdb0f8d937ac17eb1d3  usr/share/allsafe-proxy/templates/logo/logo.png
 7a614b9a197e532c00d09a23b0996b5f  usr/share/allsafe-proxy/templates/styles/3.4.17
 c325be79a5ecca85d68eb9e5b65a547a  usr/share/allsafe-proxy/templates/styles/all.min.css

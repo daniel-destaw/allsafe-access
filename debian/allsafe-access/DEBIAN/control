@@ -2,7 +2,7 @@ Package: allsafe-access
 Version: 1.0.0-1
 Architecture: amd64
 Maintainer: Daniel Destaw daniel@allsafex.com
-Installed-Size: 45692
+Installed-Size: 45656
 Depends: libc6 (>= 2.34)
 Section: unknown
 Priority: optional

@@ -468,32 +468,6 @@ func issueSampleCerts() {
 		log.Printf("Warning: Failed to copy rootCA.crt for proxy: %v", err)
 	}
 
-	// --- CLI Certificate ---
-	var cliCommonNameInput string
-	promptCliCN := &survey.Input{
-		Message: "Common Name for CLI Certificate (e.g., cli-001 or cli.allsafe.com):",
-		Default: "allsafe-cli-client",
-	}
-	survey.AskOne(promptCliCN, &cliCommonNameInput, survey.WithValidator(survey.Required))
-
-	cliCN, cliDNS, cliIPs := parseCommonNameInput(cliCommonNameInput)
-
-	cliCertDetails := CertDetails{
-		CommonName:    cliCN,
-		Organization:  []string{"Allsafe Access Client"},
-		Country:       []string{caCountry},
-		Province:      []string{caProvince},
-		DNSNames:      cliDNS,
-		IPAddresses:   cliIPs,
-	}
-	if err := issueCert("cli", cliCertDetails); err != nil {
-		log.Fatalf("Failed to issue CLI client cert: %v", err)
-	}
-	fmt.Println("Issued cli.crt and .key")
-	if err := copyFile(filepath.Join(authCfg.CertsDir, "rootCA.crt"), filepath.Join(authCfg.CertsDir, "cli_ca.crt")); err != nil {
-		log.Printf("Warning: Failed to copy rootCA.crt for cli: %v", err)
-	}
-
 	// --- Agent Certificate ---
 	var agentCommonNameInput string
 	promptAgentCN := &survey.Input{

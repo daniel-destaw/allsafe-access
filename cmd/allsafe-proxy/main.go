@@ -315,8 +315,8 @@ func runProxy(cmd *cobra.Command, args []string) {
 	// NEW: Endpoint for agents to send maximum audit events.
 	mux.HandleFunc(auditEndpoint, handleAuditEvents)
 
-	fs := http.FileServer(http.Dir("cmd/allsafe-proxy/templates"))
-	mux.Handle("/static/", http.StripPrefix("/static/", fs))
+	fs := http.FileServer(http.Dir("/usr/share/allsafe-proxy/templates/"))
+	mux.Handle("/styles/", http.StripPrefix("/styles/", fs))
 
 	server := &http.Server{
 		Addr:      proxyCfg.ListenAddress,
