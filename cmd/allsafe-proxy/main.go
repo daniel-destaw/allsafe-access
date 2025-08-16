@@ -316,7 +316,7 @@ func runProxy(cmd *cobra.Command, args []string) {
 	mux.HandleFunc(auditEndpoint, handleAuditEvents)
 
 	fs := http.FileServer(http.Dir("/usr/share/allsafe-proxy/templates/"))
-	mux.Handle("/styles/", http.StripPrefix("/styles/", fs))
+	mux.Handle("/static/", http.StripPrefix("/static/", fs))
 
 	server := &http.Server{
 		Addr:      proxyCfg.ListenAddress,

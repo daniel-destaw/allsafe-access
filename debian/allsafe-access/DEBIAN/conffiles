@@ -7,7 +7,6 @@
 /etc/allsafe-agent/certs/agent_ca.crt
 /etc/allsafe-cli/allsafe-cli.yaml
 /etc/allsafe-proxy/allsafe-proxy.yaml
-/etc/allsafe-proxy/allsafe_admin.db
 /etc/allsafe-proxy/certs/proxy.crt
 /etc/allsafe-proxy/certs/proxy.key
 /etc/allsafe-proxy/certs/proxy_ca.crt

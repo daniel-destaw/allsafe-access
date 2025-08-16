@@ -1,0 +1,226 @@
+Description: <short summary of the patch>
+ TODO: Put a short summary on the line above and replace this paragraph
+ with a longer explanation of this change. Complete the meta-information
+ with other relevant fields (see below for details). To make it easier, the
+ information below has been extracted from the changelog. Adjust it or drop
+ it.
+ .
+ allsafe-access (1.0.0-1) UNRELEASED; urgency=medium
+ .
+   * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+Author: fs <fs@unknown>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: 2025-08-15
+
+--- allsafe-access-1.0.0.orig/cmd/allsafe-auth/main.go
++++ allsafe-access-1.0.0/cmd/allsafe-auth/main.go
+@@ -468,32 +468,6 @@ func issueSampleCerts() {
+ 		log.Printf("Warning: Failed to copy rootCA.crt for proxy: %v", err)
+ 	}
+ 
+-	// --- CLI Certificate ---
+-	var cliCommonNameInput string
+-	promptCliCN := &survey.Input{
+-		Message: "Common Name for CLI Certificate (e.g., cli-001 or cli.allsafe.com):",
+-		Default: "allsafe-cli-client",
+-	}
+-	survey.AskOne(promptCliCN, &cliCommonNameInput, survey.WithValidator(survey.Required))
+-
+-	cliCN, cliDNS, cliIPs := parseCommonNameInput(cliCommonNameInput)
+-
+-	cliCertDetails := CertDetails{
+-		CommonName:    cliCN,
+-		Organization:  []string{"Allsafe Access Client"},
+-		Country:       []string{caCountry},
+-		Province:      []string{caProvince},
+-		DNSNames:      cliDNS,
+-		IPAddresses:   cliIPs,
+-	}
+-	if err := issueCert("cli", cliCertDetails); err != nil {
+-		log.Fatalf("Failed to issue CLI client cert: %v", err)
+-	}
+-	fmt.Println("Issued cli.crt and .key")
+-	if err := copyFile(filepath.Join(authCfg.CertsDir, "rootCA.crt"), filepath.Join(authCfg.CertsDir, "cli_ca.crt")); err != nil {
+-		log.Printf("Warning: Failed to copy rootCA.crt for cli: %v", err)
+-	}
+-
+ 	// --- Agent Certificate ---
+ 	var agentCommonNameInput string
+ 	promptAgentCN := &survey.Input{
+--- allsafe-access-1.0.0.orig/cmd/allsafe-proxy/main.go
++++ allsafe-access-1.0.0/cmd/allsafe-proxy/main.go
+@@ -315,8 +315,8 @@ func runProxy(cmd *cobra.Command, args [
+ 	// NEW: Endpoint for agents to send maximum audit events.
+ 	mux.HandleFunc(auditEndpoint, handleAuditEvents)
+ 
+-	fs := http.FileServer(http.Dir("cmd/allsafe-proxy/templates"))
+-	mux.Handle("/static/", http.StripPrefix("/static/", fs))
++	fs := http.FileServer(http.Dir("/usr/share/allsafe-proxy/templates/"))
++	mux.Handle("/styles/", http.StripPrefix("/styles/", fs))
+ 
+ 	server := &http.Server{
+ 		Addr:      proxyCfg.ListenAddress,
+--- allsafe-access-1.0.0.orig/cmd/test/generating.go
++++ /dev/null
+@@ -1,49 +0,0 @@
+-package main
+-
+-import (
+-	"fmt"
+-	"log"
+-	"os"
+-
+-	"allsafe-access/pkg/mfa" // Replace with your actual project path
+-)
+-
+-func main() {
+-	fmt.Println("--- Generating TOTP QR Code ---")
+-	// 1. Generate a new TOTP key. The secret will be stored in this key object.
+-	// In a real app, you would save key.Secret() to the database.
+-	totpKey, err := mfa.GenerateTOTPKey("Allsafe-Access", "john.doe")
+-	if err != nil {
+-		log.Fatalf("Error generating TOTP key: %v", err)
+-	}
+-
+-	// 2. Generate a QR code image as a byte slice from the key.
+-	qrCodeBytes, err := mfa.GenerateQRCode(totpKey)
+-	if err != nil {
+-		log.Fatalf("Error generating QR code: %v", err)
+-	}
+-
+-	// For a real application, you would serve this byte slice directly in an HTTP response.
+-	// You should NEVER save this to a persistent file in production.
+-	file, err := os.Create("totp-qrcode.png")
+-	if err != nil {
+-		log.Fatalf("Error creating file: %v", err)
+-	}
+-	defer file.Close()
+-	file.Write(qrCodeBytes)
+-
+-	fmt.Printf("TOTP QR Code saved to totp-qrcode.png. Scan this with your authenticator app.\n")
+-	fmt.Printf("Secret: %s\n", totpKey.Secret())
+-	fmt.Printf("URL: %s\n", totpKey.URL())
+-
+-	fmt.Println("\n--- Generating HOTP Secret ---")
+-	// 3. Generate a new HOTP key.
+-	// In a real application, you would save hotpKey.Secret() and the initial counter (0)
+-	// to your database for the user.
+-	hotpKey, err := mfa.GenerateHOTPKey("Allsafe-Access", "jane.doe")
+-	if err != nil {
+-		log.Fatalf("Error generating HOTP key: %v", err)
+-	}
+-	fmt.Printf("HOTP Secret: %s\n", hotpKey.Secret())
+-	fmt.Printf("Initial Counter: %d\n", 0)
+-}
+--- allsafe-access-1.0.0.orig/cmd/test/verifiying.go
++++ /dev/null
+@@ -1,54 +0,0 @@
+-package main
+-
+-import (
+-	"bufio"
+-	"fmt"
+-	"os"
+-	"strings"
+-
+-	"allsafe-access/pkg/mfa" // Replace with your actual project path
+-)
+-
+-func main() {
+-	// These values would be loaded from your database,
+-	// after they were generated and saved during the user's setup process.
+-
+-	// TOTP
+-	const totpSecret = "HJTPGZLVCJJEUJFZTWQVUWK5TTOVK5ZQ"
+-	fmt.Println("TOTP setup complete. Enter the code from your authenticator app:")
+-	fmt.Print("> ")
+-
+-	// Read user input
+-	reader := bufio.NewReader(os.Stdin)
+-	userTotpCode, _ := reader.ReadString('\n')
+-	userTotpCode = strings.TrimSpace(userTotpCode)
+-
+-	// Verify the TOTP code
+-	if mfa.VerifyTOTP(userTotpCode, totpSecret) {
+-		fmt.Printf("TOTP code %s is valid.\n", userTotpCode)
+-	} else {
+-		fmt.Printf("TOTP code %s is invalid.\n", userTotpCode)
+-	}
+-
+-
+-	fmt.Println("\n--- Verifying HOTP ---")
+-	// HOTP
+-	const hotpSecret = "5EZRWUXHUAHU34US"
+-	var hotpCounter uint64 = 0 // This would be the counter value stored in the database
+-	
+-	fmt.Println("HOTP verification. Enter the code from your authenticator app:")
+-	fmt.Print("> ")
+-
+-	// Read user input
+-	userHotpCode, _ := reader.ReadString('\n')
+-	userHotpCode = strings.TrimSpace(userHotpCode)
+-
+-	// Verify the HOTP code.
+-	if mfa.VerifyHOTP(userHotpCode, hotpSecret, hotpCounter) {
+-		fmt.Printf("HOTP code %s is valid. Incrementing counter from %d to %d.\n", userHotpCode, hotpCounter, hotpCounter+1)
+-		// In a real app, you would save this new counter value back to the database.
+-		// For example, updateCounterInDatabase(hotpCounter + 1)
+-	} else {
+-		fmt.Printf("HOTP code %s is invalid. Counter remains unchanged at %d.\n", userHotpCode, hotpCounter)
+-	}
+-}
+--- allsafe-access-1.0.0.orig/configs/configs/allsafeagent/allsafe-agent.yaml
++++ allsafe-access-1.0.0/configs/configs/allsafeagent/allsafe-agent.yaml
+@@ -1,13 +1,15 @@
+ # allsafe-agent.yaml
+ id: "agent-002" # Unique ID for this agent instance
+-proxy_url: "https://10.195.130.14:8080" # The address of your allsafe-proxy
++proxy_url: "https://ipaddress:8080" # The address of your allsafe-proxy
+ listen_address: ":8081" # The port this agent listens on for proxy connections
+-cert_file: "./configs/certs/agent.crt" # Or specify an absolute path to your cert
+-key_file: "./configs/certs/agent.key"   # Or specify an absolute path to your key
+-ca_cert_file: "./configs/certs/agent_ca.crt" # Or specify an absolute path to your CA cert
++cert_file: "/etc/allsafe-agent/certs/agent.crt" # Or specify an absolute path to your cert
++key_file: "/etc/allsafe-agent/certs/agent.key"   # Or specify an absolute path to your key
++ca_cert_file: "/etc/allsafe-agent/certs/agent_ca.crt" # Or specify an absolute path to your CA cert
+ registration_token: "mySecureSharedToken" # Must match proxy's registration_token if set
+ heartbeat_interval_seconds: 30
+ labels:
+   os: "linux"
+   env: "production"
+   region: "east"
++
++maximum_auditing_enabled: true
+\ No newline at end of file
+--- allsafe-access-1.0.0.orig/configs/configs/allsafeproxy/allsafe-proxy.yaml
++++ allsafe-access-1.0.0/configs/configs/allsafeproxy/allsafe-proxy.yaml
+@@ -1,9 +1,12 @@
+ # ~/allsafe-access/allsafe-proxy.yaml
+-listen_address: "10.195.130.14:8080" # Ensure this is correct
+-cert_file: "./configs/certs/proxy.crt" # IMPORTANT: These paths must be correct relative to your current directory when running
+-key_file: "./configs/certs/proxy.key"
+-ca_cert_file: "./configs/certs/proxy_ca.crt" # This is a copy of rootCA.crt
++listen_address: "Ipaddress:8080"
++cert_file: "/etc/allsafe-proxy/certs/proxy.crt"
++key_file: "/etc/allsafe-proxy/certs/proxy.key"
++ca_cert_file: "/etc/allsafe-proxy/certs/proxy_ca.crt"
+ agent_listen_port: 8081
+ agent_heartbeat_timeout_minutes: 5
+-registration_token: "mySecureSharedToken" # <<< Ensure this matches your agent's token exactly!
+ 
++# Application secrets - All of these must be changed from their default values.
++secret_key: "a-very-long-and-secure-secret-key-for-signing-tokens" # <<< Add this
++admin_token: "a-very-secret-admin-token-for-proxy-communication" # <<< Add this
++registration_token: "mySecureSharedToken" # <<< This should be a strong, unique token
+\ No newline at end of file

@@ -1,0 +1,67 @@
+Description: <short summary of the patch>
+ TODO: Put a short summary on the line above and replace this paragraph
+ with a longer explanation of this change. Complete the meta-information
+ with other relevant fields (see below for details). To make it easier, the
+ information below has been extracted from the changelog. Adjust it or drop
+ it.
+ .
+ allsafe-access (1.0.0-1) UNRELEASED; urgency=medium
+ .
+   * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+Author: fs <fs@unknown>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: 2025-08-15
+
+--- allsafe-access-1.0.0.orig/cmd/allsafe-proxy/main.go
++++ allsafe-access-1.0.0/cmd/allsafe-proxy/main.go
+@@ -316,7 +316,7 @@ func runProxy(cmd *cobra.Command, args [
+ 	mux.HandleFunc(auditEndpoint, handleAuditEvents)
+ 
+ 	fs := http.FileServer(http.Dir("/usr/share/allsafe-proxy/templates/"))
+-	mux.Handle("/styles/", http.StripPrefix("/styles/", fs))
++	mux.Handle("/static/", http.StripPrefix("/static/", fs))
+ 
+ 	server := &http.Server{
+ 		Addr:      proxyCfg.ListenAddress,
+--- allsafe-access-1.0.0.orig/cmd/allsafe-proxy/templates/invite_form.html
++++ allsafe-access-1.0.0/cmd/allsafe-proxy/templates/invite_form.html
+@@ -4,8 +4,8 @@
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     <title>Set Your Password</title>
+-    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
+-    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/styles/css2.css">
++    <link rel="stylesheet" href="/static/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
++    <link rel="stylesheet" href="/static/styles/css2.css">
+     <style>
+         :root {
+             --primary: #2563eb;
+@@ -285,7 +285,7 @@
+     <div class="card">
+         <div class="form-section">
+             <div class="header">
+-                <img src="/usr/share/allsafe-proxy/templates/logo/logo.png" alt="Allsafe-Access Logo" class="logo">
++                <img src="/static/logo/logo.png" alt="Allsafe-Access Logo" class="logo">
+                 <h1 class="title">Set Your Password</h1>
+                 <p class="subtitle">Create a new password for <span class="username">{{.Username}}</span>.</p>
+             </div>
+@@ -365,7 +365,7 @@
+         {{end}}
+     </div>
+ 
+-    <script src="/usr/share/allsafe-proxy/templates/styles/qrious.min.js"></script>
++    <script src="/static/styles/qrious.min.js"></script>
+     <script>
+         const passwordPolicyDetails = {
+             "none": { minLength: 0 },

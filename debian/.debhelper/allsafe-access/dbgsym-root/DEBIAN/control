@@ -5,9 +5,9 @@ Version: 1.0.0-1
 Auto-Built-Package: debug-symbols
 Architecture: amd64
 Maintainer: Daniel Destaw daniel@allsafex.com
-Installed-Size: 23695
+Installed-Size: 23698
 Depends: allsafe-access (= 1.0.0-1)
 Section: debug
 Priority: optional
 Description: debug symbols for allsafe-access
-Build-Ids: 7e23180a0a65a4e22e5047d5ee1c31dcf3148ea9 89d7d7a957b0898047e22208b4eeb6b7ad529970 d9aa913bcae84c8ab82d4d574ece9ac859dadf73 df3eb7039ec44380797733aba38f0a5991c0c82f f41ae7b240c812cfb3017778b528b829c38cfa8d
+Build-Ids: 04488b19f65840500bd9b7df60c73142db7f85fd 3ebdbc1abb0ac4ee3d8620af40b15ebb50fb8dba 6e6f4523ee5c0aace31ea019395b02a02a5d1bea a19b85433b2db479963dada9ade3542dfff93e18 c6512880045316a90cea47cb5f9590870da7ce9b

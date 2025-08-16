@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Set Your Password</title>
-    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
-    <link rel="stylesheet" href="/usr/share/allsafe-proxy/templates/styles/css2.css">
+    <link rel="stylesheet" href="/static/styles/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <link rel="stylesheet" href="/static/styles/css2.css">
     <style>
         :root {
             --primary: #2563eb;
@@ -285,7 +285,7 @@
     <div class="card">
         <div class="form-section">
             <div class="header">
-                <img src="/usr/share/allsafe-proxy/templates/logo/logo.png" alt="Allsafe-Access Logo" class="logo">
+                <img src="/static/logo/logo.png" alt="Allsafe-Access Logo" class="logo">
                 <h1 class="title">Set Your Password</h1>
                 <p class="subtitle">Create a new password for <span class="username">{{.Username}}</span>.</p>
             </div>
@@ -335,11 +335,20 @@
                 </div>
                 {{end}}
 
+                {{if .MfaEnabled}}
+                <div class="form-group">
+                    <label for="mfa_code" class="label">Authenticator Code</label>
+                    <input type="text" id="mfa_code" name="mfa_code" required class="input" 
+                           maxlength="6" placeholder="123456">
+                    <p id="mfa-error" class="error-message">Invalid authenticator code.</p>
+                </div>
+                {{end}}
+
                 <button type="submit" class="btn form-submit-btn">
                     Set Password
                 </button>
             </form>
-        </div>
+            </div>
 
         {{if .MfaEnabled}}
         <div class="qrcode-section">
@@ -351,21 +360,14 @@
                 <h3 class="instructions-title">Setup Multi-Factor Authentication</h3>
                 <p class="instructions-steps">
                     1. Open your authenticator app (Google Authenticator, Authy, etc.)<br>
-                    2. Scan the QR code or enter the setup key manually<br>
-                    3. Enter the 6-digit code below
+                    2. Scan the QR code or enter the setup key manually
                 </p>
-                <div class="form-group">
-                    <label for="mfa_code" class="label">Authenticator Code</label>
-                    <input type="text" id="mfa_code" name="mfa_code" required class="input" 
-                           maxlength="6" placeholder="123456">
-                    <p id="mfa-error" class="error-message">Invalid authenticator code.</p>
                 </div>
-            </div>
         </div>
         {{end}}
     </div>
 
-    <script src="/usr/share/allsafe-proxy/templates/styles/qrious.min.js"></script>
+    <script src="/static/styles/qrious.min.js"></script>
     <script>
         const passwordPolicyDetails = {
             "none": { minLength: 0 },
